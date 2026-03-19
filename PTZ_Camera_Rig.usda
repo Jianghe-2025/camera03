@@ -1,0 +1,107 @@
+#usda 1.0
+(
+    defaultPrim = "PTZRig"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "PTZRig"
+{
+    def Xform "Base"
+    {
+        def Cube "pillar"
+        {
+            color3f[] primvars:displayColor = [(0.25, 0.25, 0.25)]
+            double size = 1
+            double3 xformOp:scale = (0.3, 0.3, 2.0)
+            double3 xformOp:translate = (0, 0, -1.15)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Cube "mount_plate"
+        {
+            color3f[] primvars:displayColor = [(0.3, 0.3, 0.3)]
+            double size = 1
+            double3 xformOp:scale = (0.9, 0.9, 0.1)
+            double3 xformOp:translate = (0, 0, -0.35)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Xform "Pan"
+        {
+            double3 xformOp:translate = (0, 0, -0.45)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+
+            def Cube "pan_housing"
+            {
+                color3f[] primvars:displayColor = [(0.85, 0.85, 0.85)]
+                double size = 1
+                double3 xformOp:scale = (0.7, 0.7, 0.3)
+                double3 xformOp:translate = (0, 0, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Xform "Tilt"
+            {
+                double3 xformOp:translate = (0, 0, -0.15)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+
+                def Cube "fork_L"
+                {
+                    color3f[] primvars:displayColor = [(0.55, 0.55, 0.55)]
+                    double size = 1
+                    double3 xformOp:scale = (0.1, 0.06, 0.45)
+                    double3 xformOp:translate = (0, 0.28, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+                }
+
+                def Cube "fork_R"
+                {
+                    color3f[] primvars:displayColor = [(0.55, 0.55, 0.55)]
+                    double size = 1
+                    double3 xformOp:scale = (0.1, 0.06, 0.45)
+                    double3 xformOp:translate = (0, -0.28, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+                }
+
+                def Cube "cam_body"
+                {
+                    color3f[] primvars:displayColor = [(0.95, 0.95, 0.95)]
+                    double size = 1
+                    double3 xformOp:scale = (0.5, 0.4, 0.32)
+                    double3 xformOp:translate = (0.12, 0, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+                }
+
+                def Cube "lens"
+                {
+                    color3f[] primvars:displayColor = [(0.15, 0.15, 0.15)]
+                    double size = 1
+                    double3 xformOp:scale = (0.3, 0.22, 0.22)
+                    double3 xformOp:translate = (0.4, 0, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+                }
+
+                def Cube "lens_ring"
+                {
+                    color3f[] primvars:displayColor = [(0.9, 0.15, 0.15)]
+                    double size = 1
+                    double3 xformOp:scale = (0.06, 0.26, 0.26)
+                    double3 xformOp:translate = (0.56, 0, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+                }
+
+                def Camera "Camera"
+                {
+                    float2 clippingRange = (0.1, 1000)
+                    float focalLength = 10
+                    float horizontalAperture = 36
+                    float verticalAperture = 20.25
+                    double3 xformOp:translate = (0.56, 0, 0)
+                    quatd xformOp:orient = (0.5, 0.5, 0.5, 0.5)
+                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
+                }
+            }
+        }
+    }
+}
