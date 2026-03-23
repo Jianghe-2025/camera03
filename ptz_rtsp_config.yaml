@@ -26,13 +26,14 @@ rtsp_url: rtsp://localhost:8554/ptz_cam
 resolution: [1920, 1080]
 
 # 输出帧率（fps）
-fps: 25
+fps: 15
 
 # ffmpeg 视频码率
 bitrate: "4M"
 
-# 仿真步进频率（Hz），通常保持默认值
-# skip_frames = round(sim_hz / fps)，仿真比流帧率快时自动跳帧
+# 仿真步进频率（Hz），物理步进速率
+# skip_frames = round(sim_hz / fps) = round(60/15) = 4
+# 即每 4 帧只渲染 1 帧，其余 3 帧 render=False 不触发 GPU
 sim_hz: 60
 
 # RTSP 推流开关（true=同时输出 RTSP 供 VLC/NVR 使用；false=仅 MJPEG 浏览器预览）

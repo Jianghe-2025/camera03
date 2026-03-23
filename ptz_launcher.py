@@ -16,6 +16,12 @@ PTZ 轻量启动器  ptz_launcher.py
 架构说明：
     launcher（8080）← 代理 → Isaac Sim（8081）
     用户浏览器只需访问 8080，无需感知 8081。
+
+ONVIF 服务（新增）：
+    POST http://localhost:8080/onvif/device_service  ONVIF 设备服务
+    POST http://localhost:8080/onvif/media_service   ONVIF 媒体服务
+    POST http://localhost:8080/onvif/ptz_service     ONVIF PTZ 控制服务
+    GET  http://localhost:8080/onvif-snap.jpg        单帧快照（代理 Isaac 内部）
 """
 
 import argparse
@@ -29,6 +35,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import yaml
@@ -239,6 +246,390 @@ def get_status() -> dict:
     return result
 
 
+# ── ONVIF 轻量 SOAP 服务器 ───────────────────────────────────────────
+#
+# 实现当前项目 onvif_client.py 调用的最小 ONVIF 接口子集：
+#   Device  : GetCapabilities, GetSystemDateAndTime
+#   Media   : GetProfiles, GetSnapshotUri
+#   PTZ     : GetNodes, AbsoluteMove, RelativeMove, GotoPreset
+#
+# 坐标单位转换（ONVIF 归一化 → Camera03 度/倍数）：
+#   pan_deg  = onvif_pan  * 170.0        [-1,1] → [-170,170]
+#   tilt_deg = onvif_tilt * 90.0         [-1,1] → [-90, 90]，clamp 到 -90~30
+#   zoom_x   = 1.0 + onvif_zoom * 31.0  [0,1]  → [1, 32]
+# ────────────────────────────────────────────────────────────────────
+
+_SOAP12_ENV = "http://www.w3.org/2003/05/soap-envelope"
+_SOAP11_ENV = "http://schemas.xmlsoap.org/soap/envelope/"
+_TT  = "http://www.onvif.org/ver10/schema"
+_TDS = "http://www.onvif.org/ver10/device/wsdl"
+_TRT = "http://www.onvif.org/ver10/media/wsdl"
+_TPZ = "http://www.onvif.org/ver10/ptz/wsdl"
+
+# 预置位映射：token → (pan_deg, tilt_deg, zoom_x)
+_PTZ_PRESETS = {
+    "1": (0.0,    -45.0, 1.0),
+    "2": (90.0,   -45.0, 1.0),
+    "3": (-90.0,  -45.0, 1.0),
+    "home": (0.0, -45.0, 1.0),
+}
+
+
+def _soap_wrap(body_xml: str) -> bytes:
+    """将 body XML 包裹为 SOAP 1.2 Envelope。"""
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">'
+        '<s:Body>' + body_xml + '</s:Body>'
+        '</s:Envelope>'
+    ).encode("utf-8")
+
+
+def _parse_soap_action(raw: bytes):
+    """解析 SOAP XML，返回 (action_local_name, action_element)。"""
+    try:
+        root = ET.fromstring(raw)
+        for ns in (_SOAP12_ENV, _SOAP11_ENV):
+            body = root.find(f"{{{ns}}}Body")
+            if body is not None:
+                for child in body:
+                    tag = child.tag
+                    local = tag.split("}")[-1] if "}" in tag else tag
+                    return local, child
+    except Exception as e:
+        print(f"[ONVIF] XML 解析失败: {e}")
+    return None, None
+
+
+def _find_elem(elem, local_name):
+    """递归查找 local name 匹配的第一个子元素。"""
+    for child in elem.iter():
+        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        if tag == local_name:
+            return child
+    return None
+
+
+def _find_text(elem, local_name) -> str:
+    """递归查找 local name 匹配的第一个子元素的文本。"""
+    e = _find_elem(elem, local_name)
+    return (e.text or "").strip() if e is not None else ""
+
+
+def _onvif_call_control(pan=None, tilt=None, zoom=None) -> None:
+    """调用 Isaac Sim 内部 /control 接口。"""
+    payload = {}
+    if pan  is not None: payload["pan"]  = round(float(pan),  4)
+    if tilt is not None: payload["tilt"] = round(float(tilt), 4)
+    if zoom is not None: payload["zoom"] = round(float(zoom), 4)
+    if not payload:
+        return
+    try:
+        data = json.dumps(payload).encode()
+        req  = urllib.request.Request(
+            f"http://localhost:{ISAAC_PORT}/control",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=3) as r:
+            r.read()
+        print(f"[ONVIF] control OK: {payload}")
+    except Exception as e:
+        print(f"[ONVIF] control 失败 ({payload}): {e}")
+
+
+def _onvif_get_current_ptz() -> tuple:
+    """从 Isaac Sim 内部 /status 取当前 PTZ 状态，返回 (pan, tilt, zoom)。"""
+    try:
+        with urllib.request.urlopen(
+            f"http://localhost:{ISAAC_PORT}/status", timeout=1
+        ) as r:
+            data = json.loads(r.read())
+            return float(data.get("pan", 0.0)), float(data.get("tilt", -45.0)), float(data.get("zoom", 1.0))
+    except Exception:
+        return 0.0, -45.0, 1.0
+
+
+def _handle_device_service(xml_body: bytes, host_port: str) -> bytes:
+    action, elem = _parse_soap_action(xml_body)
+    print(f"[ONVIF] device_service action={action}")
+
+    if action == "GetCapabilities":
+        body = f"""
+<tds:GetCapabilitiesResponse xmlns:tds="{_TDS}">
+  <tds:Capabilities>
+    <tt:Device xmlns:tt="{_TT}">
+      <tt:XAddr>http://{host_port}/onvif/device_service</tt:XAddr>
+    </tt:Device>
+    <tt:Media xmlns:tt="{_TT}">
+      <tt:XAddr>http://{host_port}/onvif/media_service</tt:XAddr>
+      <tt:StreamingCapabilities>
+        <tt:RTPMulticast>false</tt:RTPMulticast>
+        <tt:RTP_TCP>false</tt:RTP_TCP>
+        <tt:RTP_RTSP_TCP>false</tt:RTP_RTSP_TCP>
+      </tt:StreamingCapabilities>
+    </tt:Media>
+    <tt:PTZ xmlns:tt="{_TT}">
+      <tt:XAddr>http://{host_port}/onvif/ptz_service</tt:XAddr>
+    </tt:PTZ>
+  </tds:Capabilities>
+</tds:GetCapabilitiesResponse>"""
+        return _soap_wrap(body)
+
+    if action == "GetSystemDateAndTime":
+        import datetime
+        now = datetime.datetime.utcnow()
+        body = f"""
+<tds:GetSystemDateAndTimeResponse xmlns:tds="{_TDS}">
+  <tds:SystemDateAndTime>
+    <tt:DateTimeType xmlns:tt="{_TT}">NTP</tt:DateTimeType>
+    <tt:DaylightSavings xmlns:tt="{_TT}">false</tt:DaylightSavings>
+    <tt:UTCDateTime xmlns:tt="{_TT}">
+      <tt:Time>
+        <tt:Hour>{now.hour}</tt:Hour>
+        <tt:Minute>{now.minute}</tt:Minute>
+        <tt:Second>{now.second}</tt:Second>
+      </tt:Time>
+      <tt:Date>
+        <tt:Year>{now.year}</tt:Year>
+        <tt:Month>{now.month}</tt:Month>
+        <tt:Day>{now.day}</tt:Day>
+      </tt:Date>
+    </tt:UTCDateTime>
+  </tds:SystemDateAndTime>
+</tds:GetSystemDateAndTimeResponse>"""
+        return _soap_wrap(body)
+
+    if action == "GetServices":
+        body = f"""
+<tds:GetServicesResponse xmlns:tds="{_TDS}">
+  <tds:Service>
+    <tds:Namespace>http://www.onvif.org/ver10/media/wsdl</tds:Namespace>
+    <tds:XAddr>http://{host_port}/onvif/media_service</tds:XAddr>
+    <tds:Version><tt:Major xmlns:tt="{_TT}">2</tt:Major><tt:Minor xmlns:tt="{_TT}">0</tt:Minor></tds:Version>
+  </tds:Service>
+  <tds:Service>
+    <tds:Namespace>http://www.onvif.org/ver10/ptz/wsdl</tds:Namespace>
+    <tds:XAddr>http://{host_port}/onvif/ptz_service</tds:XAddr>
+    <tds:Version><tt:Major xmlns:tt="{_TT}">2</tt:Major><tt:Minor xmlns:tt="{_TT}">0</tt:Minor></tds:Version>
+  </tds:Service>
+</tds:GetServicesResponse>"""
+        return _soap_wrap(body)
+
+    # 未知操作：返回空 OK，不报错
+    print(f"[ONVIF] device_service 未知 action={action}，返回空响应")
+    return _soap_wrap(f'<tds:UnknownResponse xmlns:tds="{_TDS}"/>')
+
+
+def _handle_media_service(xml_body: bytes, host_port: str) -> bytes:
+    action, elem = _parse_soap_action(xml_body)
+    print(f"[ONVIF] media_service action={action}")
+
+    if action == "GetProfiles":
+        body = f"""
+<trt:GetProfilesResponse xmlns:trt="{_TRT}">
+  <trt:Profiles token="MainProfileToken" fixed="true" xmlns:tt="{_TT}">
+    <tt:Name>MainStream</tt:Name>
+    <tt:PTZConfiguration token="PTZConfigToken">
+      <tt:Name>PTZConfig</tt:Name>
+      <tt:UseCount>1</tt:UseCount>
+      <tt:NodeToken>PTZNodeToken</tt:NodeToken>
+      <tt:PanTiltLimits>
+        <tt:Range>
+          <tt:URI>http://www.onvif.org/ver10/tptz/PanTiltSpaces/PositionGenericSpace</tt:URI>
+          <tt:XRange><tt:Min>-1</tt:Min><tt:Max>1</tt:Max></tt:XRange>
+          <tt:YRange><tt:Min>-1</tt:Min><tt:Max>1</tt:Max></tt:YRange>
+        </tt:Range>
+      </tt:PanTiltLimits>
+      <tt:ZoomLimits>
+        <tt:Range>
+          <tt:URI>http://www.onvif.org/ver10/tptz/ZoomSpaces/PositionGenericSpace</tt:URI>
+          <tt:XRange><tt:Min>0</tt:Min><tt:Max>1</tt:Max></tt:XRange>
+        </tt:Range>
+      </tt:ZoomLimits>
+    </tt:PTZConfiguration>
+  </trt:Profiles>
+</trt:GetProfilesResponse>"""
+        return _soap_wrap(body)
+
+    if action == "GetSnapshotUri":
+        body = f"""
+<trt:GetSnapshotUriResponse xmlns:trt="{_TRT}">
+  <trt:MediaUri>
+    <tt:Uri xmlns:tt="{_TT}">http://{host_port}/onvif-snap.jpg</tt:Uri>
+    <tt:InvalidAfterConnect xmlns:tt="{_TT}">false</tt:InvalidAfterConnect>
+    <tt:InvalidAfterReboot xmlns:tt="{_TT}">false</tt:InvalidAfterReboot>
+    <tt:Timeout xmlns:tt="{_TT}">PT30S</tt:Timeout>
+  </trt:MediaUri>
+</trt:GetSnapshotUriResponse>"""
+        return _soap_wrap(body)
+
+    if action == "GetServiceCapabilities":
+        body = f"""
+<trt:GetServiceCapabilitiesResponse xmlns:trt="{_TRT}">
+  <trt:Capabilities SnapshotUri="true" Rotation="false" VideoSourceMode="false"
+                    OSD="false" TemporaryOSDText="false" EXICompression="false"
+                    xmlns:trt="{_TRT}"/>
+</trt:GetServiceCapabilitiesResponse>"""
+        return _soap_wrap(body)
+
+    print(f"[ONVIF] media_service 未知 action={action}，返回空响应")
+    return _soap_wrap(f'<trt:UnknownResponse xmlns:trt="{_TRT}"/>')
+
+
+def _handle_ptz_service(xml_body: bytes) -> bytes:
+    action, elem = _parse_soap_action(xml_body)
+    print(f"[ONVIF] ptz_service action={action}")
+
+    if action == "GetNodes":
+        body = f"""
+<tptz:GetNodesResponse xmlns:tptz="{_TPZ}">
+  <tptz:PTZNode token="PTZNodeToken" FixedHomePosition="false" xmlns:tt="{_TT}">
+    <tt:Name>PTZNode</tt:Name>
+    <tt:SupportedPTZSpaces>
+      <tt:AbsolutePanTiltPositionSpace>
+        <tt:URI>http://www.onvif.org/ver10/tptz/PanTiltSpaces/PositionGenericSpace</tt:URI>
+        <tt:XRange><tt:Min>-1</tt:Min><tt:Max>1</tt:Max></tt:XRange>
+        <tt:YRange><tt:Min>-1</tt:Min><tt:Max>1</tt:Max></tt:YRange>
+      </tt:AbsolutePanTiltPositionSpace>
+      <tt:AbsoluteZoomPositionSpace>
+        <tt:URI>http://www.onvif.org/ver10/tptz/ZoomSpaces/PositionGenericSpace</tt:URI>
+        <tt:XRange><tt:Min>0</tt:Min><tt:Max>1</tt:Max></tt:XRange>
+      </tt:AbsoluteZoomPositionSpace>
+      <tt:RelativePanTiltTranslationSpace>
+        <tt:URI>http://www.onvif.org/ver10/tptz/PanTiltSpaces/TranslationGenericSpace</tt:URI>
+        <tt:XRange><tt:Min>-1</tt:Min><tt:Max>1</tt:Max></tt:XRange>
+        <tt:YRange><tt:Min>-1</tt:Min><tt:Max>1</tt:Max></tt:YRange>
+      </tt:RelativePanTiltTranslationSpace>
+    </tt:SupportedPTZSpaces>
+    <tt:MaximumNumberOfPresets>10</tt:MaximumNumberOfPresets>
+    <tt:HomeSupported>false</tt:HomeSupported>
+  </tptz:PTZNode>
+</tptz:GetNodesResponse>"""
+        return _soap_wrap(body)
+
+    if action == "GetConfigurations":
+        body = f"""
+<tptz:GetConfigurationsResponse xmlns:tptz="{_TPZ}">
+  <tptz:PTZConfiguration token="PTZConfigToken" xmlns:tt="{_TT}">
+    <tt:Name>PTZConfig</tt:Name>
+    <tt:UseCount>1</tt:UseCount>
+    <tt:NodeToken>PTZNodeToken</tt:NodeToken>
+    <tt:DefaultAbsolutePantTiltPositionSpace>http://www.onvif.org/ver10/tptz/PanTiltSpaces/PositionGenericSpace</tt:DefaultAbsolutePantTiltPositionSpace>
+    <tt:DefaultAbsoluteZoomPositionSpace>http://www.onvif.org/ver10/tptz/ZoomSpaces/PositionGenericSpace</tt:DefaultAbsoluteZoomPositionSpace>
+    <tt:PanTiltLimits>
+      <tt:Range>
+        <tt:URI>http://www.onvif.org/ver10/tptz/PanTiltSpaces/PositionGenericSpace</tt:URI>
+        <tt:XRange><tt:Min>-1</tt:Min><tt:Max>1</tt:Max></tt:XRange>
+        <tt:YRange><tt:Min>-1</tt:Min><tt:Max>1</tt:Max></tt:YRange>
+      </tt:Range>
+    </tt:PanTiltLimits>
+    <tt:ZoomLimits>
+      <tt:Range>
+        <tt:URI>http://www.onvif.org/ver10/tptz/ZoomSpaces/PositionGenericSpace</tt:URI>
+        <tt:XRange><tt:Min>0</tt:Min><tt:Max>1</tt:Max></tt:XRange>
+      </tt:Range>
+    </tt:ZoomLimits>
+  </tptz:PTZConfiguration>
+</tptz:GetConfigurationsResponse>"""
+        return _soap_wrap(body)
+
+    if action == "GetServiceCapabilities":
+        body = f"""
+<tptz:GetServiceCapabilitiesResponse xmlns:tptz="{_TPZ}">
+  <tptz:Capabilities EFlip="false" Reverse="false" GetCompatibleConfigurations="false"
+                     MoveStatus="false" StatusPosition="false"/>
+</tptz:GetServiceCapabilitiesResponse>"""
+        return _soap_wrap(body)
+
+    if action == "GetPresets":
+        presets_xml = ""
+        for token, (p, t, z) in _PTZ_PRESETS.items():
+            presets_xml += f"""
+  <tptz:Preset token="{token}" xmlns:tt="{_TT}">
+    <tt:Name>Preset{token}</tt:Name>
+    <tt:PTZPosition>
+      <tt:PanTilt x="{round(p/170.0, 4)}" y="{round(t/90.0, 4)}" space="http://www.onvif.org/ver10/tptz/PanTiltSpaces/PositionGenericSpace"/>
+      <tt:Zoom x="{round((z-1)/31.0, 4)}" space="http://www.onvif.org/ver10/tptz/ZoomSpaces/PositionGenericSpace"/>
+    </tt:PTZPosition>
+  </tptz:Preset>"""
+        return _soap_wrap(f'<tptz:GetPresetsResponse xmlns:tptz="{_TPZ}">{presets_xml}</tptz:GetPresetsResponse>')
+
+    if action == "AbsoluteMove":
+        try:
+            pt_elem   = _find_elem(elem, "PanTilt")
+            zoom_elem = _find_elem(elem, "Zoom")
+            pan_onvif  = float(pt_elem.get("x", 0))   if pt_elem   is not None else 0.0
+            tilt_onvif = float(pt_elem.get("y", 0))   if pt_elem   is not None else 0.0
+            zoom_onvif = float(zoom_elem.get("x", 0)) if zoom_elem is not None else 0.0
+
+            # ONVIF 归一化 → Camera03 度/倍数
+            pan_deg  = pan_onvif  * 170.0
+            tilt_deg = max(-90.0, min(30.0, tilt_onvif * 90.0))
+            zoom_x   = 1.0 + zoom_onvif * 31.0
+
+            print(f"[ONVIF] AbsoluteMove onvif=({pan_onvif:.3f},{tilt_onvif:.3f},{zoom_onvif:.3f}) "
+                  f"→ cam03=({pan_deg:.1f}°,{tilt_deg:.1f}°,{zoom_x:.2f}x)")
+            _onvif_call_control(pan=pan_deg, tilt=tilt_deg, zoom=zoom_x)
+        except Exception as e:
+            print(f"[ONVIF] AbsoluteMove 解析失败: {e}")
+        return _soap_wrap(f'<tptz:AbsoluteMoveResponse xmlns:tptz="{_TPZ}"/>')
+
+    if action == "RelativeMove":
+        try:
+            pt_elem    = _find_elem(elem, "PanTilt")
+            pan_onvif  = float(pt_elem.get("x", 0)) if pt_elem is not None else 0.0
+            tilt_onvif = float(pt_elem.get("y", 0)) if pt_elem is not None else 0.0
+
+            cur_pan, cur_tilt, _ = _onvif_get_current_ptz()
+            pan_new  = max(-170.0, min(170.0, cur_pan  + pan_onvif  * 170.0))
+            tilt_new = max(-90.0,  min(30.0,  cur_tilt + tilt_onvif * 90.0))
+
+            print(f"[ONVIF] RelativeMove Δ=({pan_onvif:.3f},{tilt_onvif:.3f}) "
+                  f"→ new=({pan_new:.1f}°,{tilt_new:.1f}°)")
+            _onvif_call_control(pan=pan_new, tilt=tilt_new)
+        except Exception as e:
+            print(f"[ONVIF] RelativeMove 解析失败: {e}")
+        return _soap_wrap(f'<tptz:RelativeMoveResponse xmlns:tptz="{_TPZ}"/>')
+
+    if action == "GotoPreset":
+        try:
+            preset_token = _find_text(elem, "PresetToken")
+            if preset_token in _PTZ_PRESETS:
+                pan_deg, tilt_deg, zoom_x = _PTZ_PRESETS[preset_token]
+                print(f"[ONVIF] GotoPreset token={preset_token} → ({pan_deg}°,{tilt_deg}°,{zoom_x}x)")
+                _onvif_call_control(pan=pan_deg, tilt=tilt_deg, zoom=zoom_x)
+            else:
+                print(f"[ONVIF] GotoPreset 未知 token={preset_token}")
+        except Exception as e:
+            print(f"[ONVIF] GotoPreset 解析失败: {e}")
+        return _soap_wrap(f'<tptz:GotoPresetResponse xmlns:tptz="{_TPZ}"/>')
+
+    if action == "GetStatus":
+        cur_pan, cur_tilt, cur_zoom = _onvif_get_current_ptz()
+        pan_n  = round(cur_pan  / 170.0, 4)
+        tilt_n = round(cur_tilt / 90.0,  4)
+        zoom_n = round((cur_zoom - 1.0) / 31.0, 4)
+        body = f"""
+<tptz:GetStatusResponse xmlns:tptz="{_TPZ}">
+  <tptz:PTZStatus xmlns:tt="{_TT}">
+    <tt:Position>
+      <tt:PanTilt x="{pan_n}" y="{tilt_n}" space="http://www.onvif.org/ver10/tptz/PanTiltSpaces/PositionGenericSpace"/>
+      <tt:Zoom x="{zoom_n}" space="http://www.onvif.org/ver10/tptz/ZoomSpaces/PositionGenericSpace"/>
+    </tt:Position>
+    <tt:MoveStatus>
+      <tt:PanTilt>IDLE</tt:PanTilt>
+      <tt:Zoom>IDLE</tt:Zoom>
+    </tt:MoveStatus>
+  </tptz:PTZStatus>
+</tptz:GetStatusResponse>"""
+        return _soap_wrap(body)
+
+    print(f"[ONVIF] ptz_service 未知 action={action}，返回空响应")
+    return _soap_wrap(f'<tptz:UnknownResponse xmlns:tptz="{_TPZ}"/>')
+
+
 # ── HTTP Handler ─────────────────────────────────────────────────────
 class _Handler(BaseHTTPRequestHandler):
 
@@ -311,6 +702,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._proxy_once(f"http://localhost:{ISAAC_PORT}/snapshot.jpg")
             return
 
+        # ONVIF 单帧快照（代理 Isaac 内部快照，供 ONVIF GetSnapshotUri 结果使用）
+        if path == "/onvif-snap.jpg":
+            self._proxy_once(f"http://localhost:{ISAAC_PORT}/snapshot.jpg")
+            return
+
         # 场景状态代理
         if path == "/scene/state":
             self._proxy_once(f"http://localhost:{ISAAC_PORT}/scene/state")
@@ -328,6 +724,29 @@ class _Handler(BaseHTTPRequestHandler):
 
         if path == "/stop":
             self._json(stop_isaac())
+            return
+
+        # ONVIF SOAP 服务（新增）
+        if path.startswith("/onvif/"):
+            length   = int(self.headers.get("Content-Length", 0))
+            xml_body = self.rfile.read(length)
+            host_port = self.headers.get("Host", f"localhost:{LAUNCHER_PORT}")
+
+            if path == "/onvif/device_service":
+                resp = _handle_device_service(xml_body, host_port)
+            elif path == "/onvif/media_service":
+                resp = _handle_media_service(xml_body, host_port)
+            elif path == "/onvif/ptz_service":
+                resp = _handle_ptz_service(xml_body)
+            else:
+                self.send_response(404); self.end_headers(); return
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/soap+xml; charset=utf-8")
+            self.send_header("Content-Length", str(len(resp)))
+            self._cors()
+            self.end_headers()
+            self.wfile.write(resp)
             return
 
         # 透明代理 POST 到 Isaac Sim 的 /control 和 /scene/* 端点
@@ -417,6 +836,11 @@ def main():
     srv = ThreadingHTTPServer(("0.0.0.0", LAUNCHER_PORT), _Handler)
     print(f"[PTZ-Launcher] 轻量启动器运行中 → http://localhost:{LAUNCHER_PORT}/")
     print(f"[PTZ-Launcher] Isaac Sim 内部端口：{ISAAC_PORT}（按需启动）")
+    print(f"[PTZ-Launcher] ONVIF 服务端点：")
+    print(f"[PTZ-Launcher]   POST http://localhost:{LAUNCHER_PORT}/onvif/device_service")
+    print(f"[PTZ-Launcher]   POST http://localhost:{LAUNCHER_PORT}/onvif/media_service")
+    print(f"[PTZ-Launcher]   POST http://localhost:{LAUNCHER_PORT}/onvif/ptz_service")
+    print(f"[PTZ-Launcher]   GET  http://localhost:{LAUNCHER_PORT}/onvif-snap.jpg")
     print(f"[PTZ-Launcher] 在 Web 界面点击 '开始推流' 启动 Isaac Sim")
     print(f"[PTZ-Launcher] 按 Ctrl-C 停止（同时停止 Isaac Sim）")
     try:

@@ -100,6 +100,9 @@ from isaacsim import SimulationApp
 sim_app = SimulationApp({
     "headless": True,
     "renderer": "RaytracedLighting",
+    "anti_aliasing": 0,                 # 关闭抗锯齿（省 GPU）
+    "samples_per_pixel_per_frame": 1,   # 每帧最少采样（省 GPU）
+    "denoiser": False,                  # 关闭 AI 降噪器（省 GPU）
     "width": W,
     "height": H,
 })
@@ -117,10 +120,44 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
+import carb
 import numpy as np
 import omni.replicator.core as rep
 import omni.usd
 from isaacsim.core.api import World
+
+# ── GPU 省电：ecoMode + asyncRendering + 限速 + 关后处理 ──────────
+def _apply_render_throttle(target_fps: int) -> None:
+    """多层限速策略，遏制 RTX 渲染器独立 GPU 线程的空转。"""
+    s = carb.settings.get_settings()
+
+    # ① ecoMode：场景静止时渲染器自动停止采样（最关键）
+    s.set("/rtx/ecoMode/enabled", True)
+    s.set("/rtx/ecoMode/maxFramesWithoutChange", 2)
+
+    # ② 异步渲染：解耦 Python 主循环与 GPU 渲染线程，
+    #    使得 Python sleep 时 GPU 也能真正空闲
+    s.set("/app/asyncRendering", True)
+    s.set("/app/asyncRenderingLowLatency", True)
+
+    # ③ Kit 内部渲染循环帧率限制（作用于 C++ 渲染线程本身）
+    for loop in ("main", "rendering_0", "rendering_1", "present"):
+        s.set(f"/app/runLoops/{loop}/rateLimitEnabled", True)
+        s.set(f"/app/runLoops/{loop}/rateLimitFrequency", target_fps)
+
+    # ④ 关闭 RTX 后处理效果（每项都减少 GPU 工作量）
+    s.set("/rtx/ambientOcclusion/enabled", False)
+    s.set("/rtx/reflections/enabled",      False)
+    s.set("/rtx/translucency/enabled",     False)
+    s.set("/rtx/post/aa/op",               0)
+    s.set("/rtx/directLighting/sampledLighting/enabled", False)
+
+    # ⑤ 禁止 throttling 扩展在 timeline play 时关闭 ecoMode
+    s.set("/exts/isaacsim.core.throttling/enable_async", False)
+    s.set("/exts/isaacsim.core.throttling/enable_manualmode", False)
+
+    print(f"[PTZ-RTSP] GPU 省电已设置：ecoMode=ON, asyncRendering=ON, "
+          f"renderLoopLimit={target_fps}fps, postFX=OFF")
 
 # ============================================================
 # PTZ 控制 HTTP API（内嵌在仿真进程中，port 8080）
@@ -682,6 +719,9 @@ def _cleanup():
 def main():
     global _ffmpeg_proc, _mediamtx_proc, _jpeg_encode_fn
 
+    # --- 渲染限速（SimulationApp 启动后立即设置，减少 GPU 空转）---
+    _apply_render_throttle(fps)
+
     # --- 初始化 MJPEG JPEG 编码器 ---
     _jpeg_encode_fn = _init_jpeg_encoder(mjpeg_quality)
 
@@ -749,8 +789,11 @@ def main():
     frame_idx = 0
     last_stat_time = time.time()
     pushed_frames = 0
+    _capture_dt = 1.0 / fps             # 每帧捕获目标耗时（秒）
+    _loop_t0    = time.perf_counter()   # 上一帧开始时刻
 
     while _running and sim_app.is_running():
+        # 每帧都做物理步进 + GPU 渲染（以 fps 为频率，非 sim_hz）
         world.step(render=True)
 
         # 应用来自 Web UI 的 PTZ 指令（检测到脏标志时写入 USD Stage）
@@ -763,8 +806,8 @@ def main():
             _scene_dirty.clear()
             _apply_scene_state(omni.usd.get_context().get_stage())
 
-        # 按 skip_frames 跳帧，使推流帧率 ≈ fps
-        if frame_idx % skip_frames == 0:
+        # 每帧都捕获（循环频率已由末尾 sleep 控制为 fps）
+        if True:
             # 触发 Replicator 更新 annotator 数据
             rep.orchestrator.step(rt_subframes=1, delta_time=0.0, pause_timeline=False)
 
@@ -808,6 +851,13 @@ def main():
                     last_stat_time = now
 
         frame_idx += 1
+
+        # ── 帧率控制：补眠剩余时间，确保主循环不超过 fps ──────────
+        _now = time.perf_counter()
+        _sleep = _capture_dt - (_now - _loop_t0)
+        if _sleep > 0.001:
+            time.sleep(_sleep)
+        _loop_t0 = time.perf_counter()
 
     # ffmpeg 管道可能已关闭，不再写入
     _cleanup()

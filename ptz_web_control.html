@@ -626,9 +626,9 @@
   <div class="pills" style="flex:1;justify-content:flex-end;">
     <span class="pill neutral" id="p-isaac">Isaac ...</span>
     <span class="pill" id="p-api">API 连接中...</span>
-    <span class="pill" id="p-stream">视频 等待中...</span>
+    <span class="pill" id="p-stream">快照 等待中...</span>
     <span class="pill" id="p-fps">-- fps</span>
-    <button class="power-btn start" id="power-btn" onclick="toggleIsaac()">⏻ 开始推流</button>
+    <button class="power-btn start" id="power-btn" onclick="toggleIsaac()">⏻ 启动仿真</button>
   </div>
 </header>
 
@@ -642,7 +642,7 @@
       <div class="ovl-icon">📷</div>
       <div class="ovl-title">Isaac Sim 未运行</div>
       <div class="ovl-sub">点击下方按钮启动 Isaac Sim 仿真服务，首次启动约需 60~120 秒加载场景。</div>
-      <button class="ovl-btn" id="ovl-start-btn" onclick="toggleIsaac()">⏻ 开始推流</button>
+      <button class="ovl-btn" id="ovl-start-btn" onclick="toggleIsaac()">⏻ 启动仿真</button>
       <div class="ovl-log" id="ovl-log"></div>
     </div>
     <div class="video-hud">
@@ -659,13 +659,13 @@
         <div>1920 × 1080</div>
       </div>
       <div class="hud-bl">
-        <span>rtsp://localhost:8554/ptz_cam</span>
+        <span>ONVIF · :8080/onvif/device_service</span>
         <span id="hud-fl">FL: 18.1mm</span>
       </div>
       <div class="video-placeholder" id="placeholder">
         <div class="placeholder-icon">📷</div>
         <div>正在连接视频流...</div>
-        <div style="font-size:.72rem;color:var(--text3)">HLS · http://localhost:8888/ptz_cam</div>
+        <div style="font-size:.72rem;color:var(--text3)">快照 · http://localhost:8080/onvif-snap.jpg</div>
       </div>
     </div>
   </div>
@@ -740,17 +740,17 @@
       </div>
     </div>
 
-    <!-- Stream info -->
+    <!-- ONVIF info -->
     <div class="card">
-      <div class="card-title">流信息</div>
+      <div class="card-title">ONVIF 接入信息</div>
       <div class="info-table">
         <div class="info-cell">
-          <div class="info-key">RTSP 地址</div>
-          <div class="info-val">:8554/ptz_cam</div>
+          <div class="info-key">设备服务</div>
+          <div class="info-val">:8080/onvif/device_service</div>
         </div>
         <div class="info-cell">
-          <div class="info-key">HLS 地址</div>
-          <div class="info-val ac">:8888/ptz_cam</div>
+          <div class="info-key">快照地址</div>
+          <div class="info-val ac">:8080/onvif-snap.jpg</div>
         </div>
         <div class="info-cell">
           <div class="info-key">控制 API</div>
@@ -1138,101 +1138,60 @@ function tick() {
 }
 setInterval(tick, 1000); tick();
 
-// ── MJPEG Canvas 播放器 ───────────────────────────────────
+// ── ONVIF 单帧快照轮询（替代 MJPEG，每 500ms 取一帧）─────────────
 const canvas      = document.getElementById('stream-canvas');
 const ctx         = canvas.getContext('2d');
 const placeholder = document.getElementById('placeholder');
-const MJPEG_URL   = `http://${HOST}:8080/stream.mjpeg`;   // launcher 代理转发到 Isaac Sim
+const SNAP_URL    = `http://${HOST}:8080/onvif-snap.jpg`;
 
-let _streamRunning = true;
+let _snapRunning = true;
 let _fpsFrames = 0, _fpsT0 = performance.now();
 
 function setStreamStatus(ok, msg) {
   const el = document.getElementById('p-stream');
-  el.textContent = '视频 ' + (msg || (ok ? '正常' : '断开'));
+  el.textContent = '快照 ' + (msg || (ok ? '正常' : '断开'));
   el.className = 'pill ' + (ok ? 'ok' : 'err');
   placeholder.style.display = ok ? 'none' : 'flex';
 }
 
-function _concat(a, b) {
-  const out = new Uint8Array(a.length + b.length);
-  out.set(a, 0); out.set(b, a.length);
-  return out;
-}
-
-async function startMJPEG() {
-  while (_streamRunning) {
-    try {
-      const res = await fetch(MJPEG_URL);
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-
-      const reader = res.body.getReader();
-      let buf = new Uint8Array(0);
-
-      setStreamStatus(true, '流正常');
-      placeholder.style.display = 'none';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf = _concat(buf, value);
-
-        // 从缓冲区提取所有完整的 JPEG 帧（FF D8 … FF D9）
-        while (true) {
-          // 找 JPEG SOI
-          let s = -1;
-          for (let i = 0; i < buf.length - 1; i++) {
-            if (buf[i] === 0xFF && buf[i+1] === 0xD8) { s = i; break; }
-          }
-          if (s < 0) { buf = new Uint8Array(0); break; }
-
-          // 找 JPEG EOI
-          let e = -1;
-          for (let i = s + 2; i < buf.length - 1; i++) {
-            if (buf[i] === 0xFF && buf[i+1] === 0xD9) { e = i + 2; break; }
-          }
-          if (e < 0) {
-            // 帧不完整，保留 s 之后的数据等待更多数据
-            if (s > 0) buf = buf.slice(s);
-            break;
-          }
-
-          // 提取并渲染一帧
-          const jpeg = buf.slice(s, e);
-          buf = buf.slice(e);
-
-          const blob = new Blob([jpeg], { type: 'image/jpeg' });
-          const url  = URL.createObjectURL(blob);
-          await new Promise(resolve => {
-            const img = new Image();
-            img.onload = () => {
-              // 保持画布与图像分辨率同步
-              if (canvas.width !== img.width || canvas.height !== img.height) {
-                canvas.width  = img.width;
-                canvas.height = img.height;
-              }
-              ctx.drawImage(img, 0, 0);
-              URL.revokeObjectURL(url);
-
-              // FPS 计算
-              _fpsFrames++;
-              const now = performance.now();
-              if (now - _fpsT0 >= 2000) {
-                const fps = (_fpsFrames / ((now - _fpsT0) / 1000)).toFixed(1);
-                document.getElementById('p-fps').textContent = fps + ' fps';
-                _fpsFrames = 0; _fpsT0 = now;
-              }
-              resolve();
-            };
-            img.onerror = () => { URL.revokeObjectURL(url); resolve(); };
-            img.src = url;
-          });
-        }
+async function startSnapshotPolling() {
+  while (_snapRunning) {
+    if (isaacState === 'running') {
+      try {
+        const res = await fetch(SNAP_URL + '?_t=' + Date.now(), { signal: AbortSignal.timeout(3000) });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const blob = await res.blob();
+        const url  = URL.createObjectURL(blob);
+        await new Promise(resolve => {
+          const img = new Image();
+          img.onload = () => {
+            if (canvas.width !== img.width || canvas.height !== img.height) {
+              canvas.width  = img.width;
+              canvas.height = img.height;
+            }
+            ctx.drawImage(img, 0, 0);
+            URL.revokeObjectURL(url);
+            _fpsFrames++;
+            const now = performance.now();
+            if (now - _fpsT0 >= 2000) {
+              const fps = (_fpsFrames / ((now - _fpsT0) / 1000)).toFixed(1);
+              document.getElementById('p-fps').textContent = fps + ' fps';
+              _fpsFrames = 0; _fpsT0 = now;
+            }
+            resolve();
+          };
+          img.onerror = () => { URL.revokeObjectURL(url); resolve(); };
+          img.src = url;
+        });
+        setStreamStatus(true, '正常');
+        placeholder.style.display = 'none';
+      } catch (err) {
+        setStreamStatus(false, '重连中...');
       }
-    } catch (err) {
-      setStreamStatus(false, '重连中...');
-      await new Promise(r => setTimeout(r, 3000));
+    } else {
+      setStreamStatus(false, '等待仿真...');
     }
+    await new Promise(r => setTimeout(r, 500));
   }
 }
 
@@ -1320,7 +1279,7 @@ async function syncSceneState() {
 // 初始化工人按钮状态
 setWorkers(2);
 updateAll();
-startMJPEG();
+startSnapshotPolling();
 // 首次立即检测 Isaac 状态
 (async () => {
   try {
