@@ -625,8 +625,8 @@
   </div>
   <div class="pills" style="flex:1;justify-content:flex-end;">
     <span class="pill neutral" id="p-isaac">Isaac ...</span>
-    <span class="pill" id="p-api">API 连接中...</span>
-    <span class="pill" id="p-stream">快照 等待中...</span>
+    <span class="pill" id="p-api">ONVIF 连接中...</span>
+    <span class="pill" id="p-stream">WS 等待仿真...</span>
     <span class="pill" id="p-fps">-- fps</span>
     <button class="power-btn start" id="power-btn" onclick="toggleIsaac()">⏻ 启动仿真</button>
   </div>
@@ -665,7 +665,7 @@
       <div class="video-placeholder" id="placeholder">
         <div class="placeholder-icon">📷</div>
         <div>正在连接视频流...</div>
-        <div style="font-size:.72rem;color:var(--text3)">快照 · http://localhost:8080/onvif-snap.jpg</div>
+        <div style="font-size:.72rem;color:var(--text3)">WebSocket · ws://&lt;host&gt;:8765/</div>
       </div>
     </div>
   </div>
@@ -954,9 +954,14 @@ function updateAll() {
   document.getElementById('hud-fl').textContent = `FL: ${fl}mm`;
 }
 
-// ── API communication ─────────────────────────────────────
-let sendTimer = null;
+// ── ONVIF PTZ 控制 ────────────────────────────────────────
+// 坐标映射（与 ptz_launcher.py 保持一致）：
+//   pan_onvif  = pan_deg / 170      [-170°,170°] → [-1,1]
+//   tilt_onvif = tilt_deg / 90      [-90°, +30°] → [-1,1] (clamp 90)
+//   zoom_onvif = (zoom - 1) / 31    [1×, 32×]   → [0,1]
+const ONVIF_PTZ = `${API}/onvif/ptz_service`;
 
+let sendTimer = null;
 function scheduleApply() {
   clearTimeout(sendTimer);
   sendTimer = setTimeout(sendControl, 80);
@@ -964,11 +969,27 @@ function scheduleApply() {
 
 async function sendControl() {
   if (isaacState !== 'running') return;
+  const panN  = (state.pan  / 170).toFixed(5);
+  const tiltN = (state.tilt /  90).toFixed(5);
+  const zoomN = ((state.zoom - 1) / 31).toFixed(5);
+  const soap  = `<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+            xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
+  <s:Body>
+    <tptz:AbsoluteMove>
+      <tptz:ProfileToken>main</tptz:ProfileToken>
+      <tptz:Position>
+        <tptz:PanTilt x="${panN}" y="${tiltN}"/>
+        <tptz:Zoom x="${zoomN}"/>
+      </tptz:Position>
+    </tptz:AbsoluteMove>
+  </s:Body>
+</s:Envelope>`;
   try {
-    const r = await fetch(`${API}/control`, {
+    const r = await fetch(ONVIF_PTZ, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pan: state.pan, tilt: state.tilt, zoom: state.zoom }),
+      headers: { 'Content-Type': 'application/soap+xml; charset=utf-8' },
+      body: soap,
     });
     setApiStatus(r.ok);
   } catch { setApiStatus(false); }
@@ -976,22 +997,57 @@ async function sendControl() {
 
 function setApiStatus(ok) {
   const el = document.getElementById('p-api');
-  if (ok) { el.textContent = 'API ✓'; el.className = 'pill ok'; }
-  else     { el.textContent = 'API ✗'; el.className = 'pill err'; }
+  if (ok) { el.textContent = 'ONVIF ✓'; el.className = 'pill ok'; }
+  else     { el.textContent = 'ONVIF ✗'; el.className = 'pill err'; }
 }
 
 // ── Isaac Sim 启停 ─────────────────────────────────────────
 async function toggleIsaac() {
   const btn    = document.getElementById('power-btn');
   const ovlBtn = document.getElementById('ovl-start-btn');
+  const logEl  = document.getElementById('ovl-log');
   if (isaacState === 'stopped') {
     btn.disabled    = true;
     ovlBtn.disabled = true;
     ovlBtn.textContent = '⏳ 启动中...';
-    await fetch(`${API}/start`, { method: 'POST' });
+    if (logEl) logEl.textContent = '';
+    try {
+      const r = await fetch(`${API}/start`, { method: 'POST' });
+      let data = {};
+      try { data = await r.json(); } catch { /* 非 JSON */ }
+      if (!r.ok || data.ok === false) {
+        const msg = data.error || `HTTP ${r.status}`;
+        if (logEl) logEl.textContent = '启动失败: ' + msg;
+        try {
+          const sr = await fetch(`${API}/status`, { signal: AbortSignal.timeout(3000) });
+          if (sr.ok) {
+            const st = await sr.json();
+            if (st.isaac_state) { _applyIsaacState(st.isaac_state); return; }
+          }
+        } catch { /* ignore */ }
+        _applyIsaacState('stopped');
+        return;
+      }
+      _applyIsaacState('starting');
+      pollStatus();
+    } catch (e) {
+      if (logEl) {
+        logEl.textContent = '无法连接 Launcher（' + (e.message || e) + '）。请从 ' + API + '/ 打开页面，并确认已在本机运行: python3 ptz_launcher.py';
+      }
+      _applyIsaacState('stopped');
+    }
   } else if (isaacState === 'running') {
     btn.disabled = true;
-    await fetch(`${API}/stop`, { method: 'POST' });
+    try {
+      const r = await fetch(`${API}/stop`, { method: 'POST' });
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        if (logEl) logEl.textContent = '停止失败: ' + (data.error || r.status);
+        btn.disabled = false;
+      }
+    } catch {
+      btn.disabled = false;
+    }
   }
 }
 
@@ -1035,6 +1091,8 @@ function _applyIsaacState(st) {
       pill.className   = 'pill ok';
       // 同步场景状态（吊篮 + 工人）
       setTimeout(syncSceneState, 500);
+      // Isaac 就绪后延迟 1s 发起 WebSocket 连接（等待 WS 服务器绑定端口）
+      setTimeout(_wsConnect, 1000);
       break;
     case 'stopping':
       btn.className   = 'power-btn loading';
@@ -1042,6 +1100,7 @@ function _applyIsaacState(st) {
       btn.disabled    = true;
       pill.textContent = 'Isaac 停止中';
       pill.className   = 'pill warn';
+      _wsDisconnect();
       break;
   }
 }
@@ -1069,6 +1128,11 @@ async function pollStatus() {
     const r = await fetch(`${API}/status`, { signal: AbortSignal.timeout(2000) });
     if (!r.ok) return;
     const s = await r.json();
+
+    // 同步 WebSocket 端口（ws_port 由 ptz_config.yaml 配置，Launcher 透传）
+    if (s.ws_port && s.ws_port !== _wsPort) {
+      _wsPort = s.ws_port;
+    }
 
     // 更新 Isaac 状态
     if (s.isaac_state && s.isaac_state !== isaacState) {
@@ -1138,61 +1202,88 @@ function tick() {
 }
 setInterval(tick, 1000); tick();
 
-// ── ONVIF 单帧快照轮询（替代 MJPEG，每 500ms 取一帧）─────────────
+// ── WebSocket 视频流（每帧 binary JPEG，Isaac Sim 直推）────────────
 const canvas      = document.getElementById('stream-canvas');
 const ctx         = canvas.getContext('2d');
 const placeholder = document.getElementById('placeholder');
-const SNAP_URL    = `http://${HOST}:8080/onvif-snap.jpg`;
 
-let _snapRunning = true;
-let _fpsFrames = 0, _fpsT0 = performance.now();
+let _wsPort       = 8765;   // 从 /status 动态读取，默认值与 ptz_config.yaml 一致
+let _ws           = null;
+let _wsActive     = false;
+let _wsRetryMs    = 1000;
+let _wsRetryTimer = null;
+let _fpsFrames    = 0, _fpsT0 = performance.now();
 
 function setStreamStatus(ok, msg) {
   const el = document.getElementById('p-stream');
-  el.textContent = '快照 ' + (msg || (ok ? '正常' : '断开'));
+  el.textContent = 'WS ' + (msg || (ok ? '正常' : '断开'));
   el.className = 'pill ' + (ok ? 'ok' : 'err');
   placeholder.style.display = ok ? 'none' : 'flex';
 }
 
-async function startSnapshotPolling() {
-  while (_snapRunning) {
+function _drawJpegBlob(blob) {
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  img.onload = () => {
+    if (canvas.width !== img.width || canvas.height !== img.height) {
+      canvas.width  = img.width;
+      canvas.height = img.height;
+    }
+    ctx.drawImage(img, 0, 0);
+    URL.revokeObjectURL(url);
+    _fpsFrames++;
+    const now = performance.now();
+    if (now - _fpsT0 >= 2000) {
+      const fps = (_fpsFrames / ((now - _fpsT0) / 1000)).toFixed(1);
+      document.getElementById('p-fps').textContent = fps + ' fps';
+      _fpsFrames = 0; _fpsT0 = now;
+    }
+  };
+  img.onerror = () => URL.revokeObjectURL(url);
+  img.src = url;
+}
+
+function _wsConnect() {
+  clearTimeout(_wsRetryTimer);
+  if (_ws && (_ws.readyState === WebSocket.CONNECTING || _ws.readyState === WebSocket.OPEN)) return;
+
+  const url = `ws://${HOST}:${_wsPort}/`;
+  setStreamStatus(false, '连接中...');
+  _ws = new WebSocket(url);
+  _ws.binaryType = 'blob';
+
+  _ws.onopen = () => {
+    _wsActive  = true;
+    _wsRetryMs = 1000;
+    setStreamStatus(true, '正常');
+    placeholder.style.display = 'none';
+  };
+
+  _ws.onmessage = (ev) => {
+    if (ev.data instanceof Blob) _drawJpegBlob(ev.data);
+  };
+
+  _ws.onclose = () => {
+    _wsActive = false;
+    _ws = null;
     if (isaacState === 'running') {
-      try {
-        const res = await fetch(SNAP_URL + '?_t=' + Date.now(), { signal: AbortSignal.timeout(3000) });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const blob = await res.blob();
-        const url  = URL.createObjectURL(blob);
-        await new Promise(resolve => {
-          const img = new Image();
-          img.onload = () => {
-            if (canvas.width !== img.width || canvas.height !== img.height) {
-              canvas.width  = img.width;
-              canvas.height = img.height;
-            }
-            ctx.drawImage(img, 0, 0);
-            URL.revokeObjectURL(url);
-            _fpsFrames++;
-            const now = performance.now();
-            if (now - _fpsT0 >= 2000) {
-              const fps = (_fpsFrames / ((now - _fpsT0) / 1000)).toFixed(1);
-              document.getElementById('p-fps').textContent = fps + ' fps';
-              _fpsFrames = 0; _fpsT0 = now;
-            }
-            resolve();
-          };
-          img.onerror = () => { URL.revokeObjectURL(url); resolve(); };
-          img.src = url;
-        });
-        setStreamStatus(true, '正常');
-        placeholder.style.display = 'none';
-      } catch (err) {
-        setStreamStatus(false, '重连中...');
-      }
+      setStreamStatus(false, `重连中 (${(_wsRetryMs/1000).toFixed(0)}s)...`);
+      _wsRetryTimer = setTimeout(_wsConnect, _wsRetryMs);
+      _wsRetryMs = Math.min(_wsRetryMs * 2, 16000);
     } else {
       setStreamStatus(false, '等待仿真...');
     }
-    await new Promise(r => setTimeout(r, 500));
-  }
+  };
+
+  _ws.onerror = () => {
+    _ws.close();
+  };
+}
+
+function _wsDisconnect() {
+  if (_ws) { _ws.onclose = null; _ws.close(); _ws = null; }
+  _wsActive = false;
+  setStreamStatus(false, '等待仿真...');
 }
 
 // ── 场景控制 ──────────────────────────────────────────────
@@ -1279,13 +1370,14 @@ async function syncSceneState() {
 // 初始化工人按钮状态
 setWorkers(2);
 updateAll();
-startSnapshotPolling();
-// 首次立即检测 Isaac 状态
+setStreamStatus(false, '等待仿真...');
+// 首次立即检测 Isaac 状态（若 Isaac 已运行，_applyIsaacState 会触发 _wsConnect）
 (async () => {
   try {
     const r = await fetch(`${API}/status`, { signal: AbortSignal.timeout(3000) });
     if (r.ok) {
       const s = await r.json();
+      if (s.ws_port) _wsPort = s.ws_port;
       _applyIsaacState(s.isaac_state || 'stopped');
       if (s.ptz) { Object.assign(state, s.ptz); updateAll(); }
     }

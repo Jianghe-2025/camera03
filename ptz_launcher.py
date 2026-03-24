@@ -1,32 +1,31 @@
 #!/usr/bin/env python3
 """
-PTZ 轻量启动器  ptz_launcher.py
-================================
-始终运行的轻量 Web 服务（默认端口 8080），GPU 占用接近 0%。
-通过 Web UI 按需启动 / 停止 Isaac Sim 推流进程（ptz_rtsp_stream.py）。
+PTZ 启动器  ptz_launcher.py
+============================
+常驻轻量服务（默认端口 8080），GPU 占用接近 0%。
+通过 HTTP API 或 ONVIF 控制 Isaac Sim 推流进程。
 
 使用方法：
-    python3 ptz_launcher.py [--config ./ptz_rtsp_config.yaml]
+    python3 ptz_launcher.py [--config ./ptz_config.yaml]
 
-访问地址：
-    http://localhost:8080/          Web 控制面板（始终可用）
-    POST http://localhost:8080/start  启动 Isaac Sim 推流
-    POST http://localhost:8080/stop   停止 Isaac Sim 推流
+管理接口：
+    GET  http://localhost:8080/status   Isaac Sim 状态 + 当前 PTZ
+    POST http://localhost:8080/start    启动 Isaac Sim 推流
+    POST http://localhost:8080/stop     停止 Isaac Sim 推流（释放 GPU）
+    GET  http://localhost:8080/log      Isaac 启动日志末尾 8KB
 
-架构说明：
-    launcher（8080）← 代理 → Isaac Sim（8081）
-    用户浏览器只需访问 8080，无需感知 8081。
-
-ONVIF 服务（新增）：
+ONVIF 服务（供 NVR / 第三方平台）：
     POST http://localhost:8080/onvif/device_service  ONVIF 设备服务
-    POST http://localhost:8080/onvif/media_service   ONVIF 媒体服务
-    POST http://localhost:8080/onvif/ptz_service     ONVIF PTZ 控制服务
-    GET  http://localhost:8080/onvif-snap.jpg        单帧快照（代理 Isaac 内部）
+    POST http://localhost:8080/onvif/media_service   ONVIF 媒体服务（GetProfiles / GetSnapshotUri）
+    POST http://localhost:8080/onvif/ptz_service     ONVIF PTZ 控制
+    GET  http://localhost:8080/onvif-snap.jpg        单帧快照
+
 """
 
 import argparse
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -44,7 +43,7 @@ import yaml
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
 ap = argparse.ArgumentParser(description="PTZ Launcher - lightweight always-on controller")
-ap.add_argument("--config", default=os.path.join(script_dir, "ptz_rtsp_config.yaml"))
+ap.add_argument("--config", default=os.path.join(script_dir, "ptz_config.yaml"))
 args, _ = ap.parse_known_args()
 
 with open(args.config, "r", encoding="utf-8") as f:
@@ -52,9 +51,12 @@ with open(args.config, "r", encoding="utf-8") as f:
 
 LAUNCHER_PORT = cfg.get("launcher_port", 8080)
 ISAAC_PORT    = cfg.get("ctrl_port",     8081)
+WS_PORT       = cfg.get("ws_port",       8765)
+MEDIAMTX_CFG_ABS = os.path.abspath(os.path.join(script_dir, "mediamtx.yml"))
+RTSP_PUSH_URL = (cfg.get("rtsp_url") or "").strip()
 PYTHON_SH     = cfg.get("python_sh",
                          "/home/uniubi/projects/issac/.isaac_sim_unzip/python.sh")
-STREAM_SCRIPT = os.path.join(script_dir, "ptz_rtsp_stream.py")
+STREAM_SCRIPT = os.path.join(script_dir, "ptz_stream.py")
 ISAAC_LOG     = os.path.join(script_dir, "isaac_stream.log")
 
 # ── Isaac Sim 子进程管理 ─────────────────────────────────────────────
@@ -98,13 +100,8 @@ def _watch_isaac(proc: subprocess.Popen) -> None:
     # ── 阶段二：持续监控，进程退出后标记 stopped ──────────────
     while True:
         if proc.poll() is not None:
-            # 进程已退出（正常 or 崩溃），做兜底清理
-            for name in ("mediamtx", "ffmpeg"):
-                try:
-                    subprocess.run(["pkill", "-9", "-f", name],
-                                   capture_output=True, timeout=3)
-                except Exception:
-                    pass
+            # 进程已退出（正常 or 崩溃），做兜底清理（不误杀其他相机目录的推流）
+            _pkill_orphan_stream_children()
             _isaac_state = "stopped"
             return
         time.sleep(2)
@@ -112,23 +109,41 @@ def _watch_isaac(proc: subprocess.Popen) -> None:
 
 def start_isaac() -> dict:
     global _isaac_proc, _start_time, _isaac_state
+    if not os.path.isfile(PYTHON_SH):
+        return {"ok": False, "error": f"未找到 Isaac python.sh：{PYTHON_SH}（请在 YAML 中配置正确的 python_sh）"}
+    if not os.access(PYTHON_SH, os.X_OK):
+        return {"ok": False, "error": f"python.sh 不可执行：{PYTHON_SH}"}
+    if not os.path.isfile(STREAM_SCRIPT):
+        return {"ok": False, "error": f"未找到推流脚本：{STREAM_SCRIPT}"}
+
     with _proc_lock:
         if _isaac_proc is not None and _isaac_proc.poll() is None:
             return {"ok": False, "error": "Isaac Sim 已在运行"}
 
-        log_file = open(ISAAC_LOG, "w", encoding="utf-8", buffering=1)
-        cmd = [
-            PYTHON_SH, STREAM_SCRIPT,
-            "--config", args.config,
-            "--ctrl-port", str(ISAAC_PORT),
-        ]
-        _isaac_proc = subprocess.Popen(
-            cmd,
-            stdout=log_file,
-            stderr=log_file,
-            cwd=script_dir,
-            start_new_session=True,   # 创建独立进程组，确保停止时能整组杀掉
-        )
+        try:
+            log_file = open(ISAAC_LOG, "w", encoding="utf-8", buffering=1)
+        except OSError as e:
+            return {"ok": False, "error": f"无法写入日志 {ISAAC_LOG}: {e}"}
+        try:
+            cmd = [
+                PYTHON_SH, STREAM_SCRIPT,
+                "--config", args.config,
+                "--ctrl-port", str(ISAAC_PORT),
+            ]
+            _isaac_proc = subprocess.Popen(
+                cmd,
+                stdout=log_file,
+                stderr=log_file,
+                cwd=script_dir,
+                start_new_session=True,   # 创建独立进程组，确保停止时能整组杀掉
+            )
+        except OSError as e:
+            try:
+                log_file.close()
+            except Exception:
+                pass
+            return {"ok": False, "error": f"无法启动子进程：{e}"}
+
         _start_time  = time.time()
         _isaac_state = "starting"
 
@@ -141,6 +156,30 @@ def _port_free(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.3)
         return s.connect_ex(("127.0.0.1", port)) != 0
+
+
+def _pkill_orphan_stream_children() -> None:
+    """
+    仅清理本目录 mediamtx 与使用本机 rtsp_url 的 ffmpeg。
+    避免多路相机同机并行时， broad pkill mediamtx/ffmpeg 误杀其他实例。
+    """
+    try:
+        subprocess.run(
+            ["pkill", "-9", "-f", re.escape(MEDIAMTX_CFG_ABS)],
+            capture_output=True,
+            timeout=3,
+        )
+    except Exception:
+        pass
+    if RTSP_PUSH_URL:
+        try:
+            subprocess.run(
+                ["pkill", "-9", "-f", re.escape(RTSP_PUSH_URL)],
+                capture_output=True,
+                timeout=3,
+            )
+        except Exception:
+            pass
 
 
 def stop_isaac() -> dict:
@@ -190,16 +229,11 @@ def stop_isaac() -> dict:
         except (subprocess.TimeoutExpired, ChildProcessError):
             pass
 
-        # ⑤ 名称兜底：杀掉可能已脱离进程组的 mediamtx / ffmpeg
-        for name in ("mediamtx", "ffmpeg"):
-            try:
-                subprocess.run(["pkill", "-9", "-f", name],
-                               capture_output=True, timeout=3)
-            except Exception:
-                pass
+        # ⑤ 名称兜底：杀掉可能已脱离进程组的 mediamtx / ffmpeg（限定本实例）
+        _pkill_orphan_stream_children()
 
         # ⑥ 等待 GPU 驱动侧资源释放（端口释放后 CUDA context 通常也很快回收）
-        for port in (ISAAC_PORT, 8554, 8888):
+        for port in (ISAAC_PORT, WS_PORT, 8554, 8888):
             for _ in range(20):
                 if _port_free(port):
                     break
@@ -232,6 +266,7 @@ def get_status() -> dict:
     result = {
         "isaac_state":  state,          # stopped | starting | running | stopping
         "isaac_port":   ISAAC_PORT,
+        "ws_port":      WS_PORT,
         "uptime_s":     up_sec if state == "running" else 0,
         "ptz":          None,
     }
@@ -658,19 +693,6 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
 
-        # Web UI
-        if path in ("/", "/index.html"):
-            html_path = os.path.join(script_dir, "ptz_web_control.html")
-            if not os.path.isfile(html_path):
-                self.send_response(404); self.end_headers(); return
-            data = open(html_path, "rb").read()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self._cors()
-            self.end_headers()
-            self.wfile.write(data)
-            return
-
         # 启动器状态
         if path == "/status":
             self._json(get_status())
@@ -692,22 +714,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self.send_response(404); self.end_headers()
             return
 
-        # MJPEG 代理（持续流）
-        if path == "/stream.mjpeg":
-            self._proxy_stream(f"http://localhost:{ISAAC_PORT}/stream.mjpeg")
-            return
-
-        # 快照代理
-        if path == "/snapshot.jpg":
-            self._proxy_once(f"http://localhost:{ISAAC_PORT}/snapshot.jpg")
-            return
-
-        # ONVIF 单帧快照（代理 Isaac 内部快照，供 ONVIF GetSnapshotUri 结果使用）
+        # ONVIF 单帧快照（代理 Isaac 内部快照，供 ONVIF GetSnapshotUri 使用）
         if path == "/onvif-snap.jpg":
             self._proxy_once(f"http://localhost:{ISAAC_PORT}/snapshot.jpg")
             return
 
-        # 场景状态代理
+        # 场景状态代理（吊篮 + 工人，无 ONVIF 标准对应，保留自定义 HTTP）
         if path == "/scene/state":
             self._proxy_once(f"http://localhost:{ISAAC_PORT}/scene/state")
             return
@@ -726,7 +738,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(stop_isaac())
             return
 
-        # ONVIF SOAP 服务（新增）
+        # 场景控制代理（吊篮高度 + 工人数量）
+        if path in ("/scene/gondola", "/scene/workers"):
+            length = int(self.headers.get("Content-Length", 0))
+            body   = self.rfile.read(length)
+            if _isaac_state != "running":
+                self._json({"ok": False, "error": "Isaac Sim 未就绪"}, 503)
+                return
+            self._proxy_post(path, body)
+            return
+
+        # ONVIF SOAP 服务
         if path.startswith("/onvif/"):
             length   = int(self.headers.get("Content-Length", 0))
             xml_body = self.rfile.read(length)
@@ -749,51 +771,11 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(resp)
             return
 
-        # 透明代理 POST 到 Isaac Sim 的 /control 和 /scene/* 端点
-        if path in ("/control", "/scene/gondola", "/scene/workers"):
-            length = int(self.headers.get("Content-Length", 0))
-            body   = self.rfile.read(length)
-            if _isaac_state != "running":
-                self._json({"ok": False, "error": "Isaac Sim 未就绪"}, 503)
-                return
-            self._proxy_post(path, body)
-            return
-
         self.send_response(404); self.end_headers()
 
     # ── 代理工具 ─────────────────────────────────────────────
-    def _proxy_stream(self, url: str) -> None:
-        """代理持续 MJPEG 流。"""
-        try:
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=5) as upstream:
-                ct = upstream.headers.get(
-                    "Content-Type",
-                    "multipart/x-mixed-replace; boundary=ptzframe"
-                )
-                self.send_response(200)
-                self.send_header("Content-Type", ct)
-                self.send_header("Cache-Control", "no-cache, no-store")
-                self.send_header("Connection",    "close")
-                self._cors()
-                self.end_headers()
-                while True:
-                    chunk = upstream.read(65536)
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
-        except Exception:
-            # Isaac Sim 未就绪，返回 503
-            try:
-                self.send_response(503); self.end_headers()
-            except Exception:
-                pass
-
     def _proxy_post(self, path: str, body: bytes) -> None:
-        """将 POST 请求代理到 Isaac Sim 并返回响应。"""
+        """将 POST 请求代理到 Isaac Sim 内部端口并返回响应。"""
         try:
             req = urllib.request.Request(
                 f"http://localhost:{ISAAC_PORT}{path}",
@@ -834,14 +816,19 @@ class _Handler(BaseHTTPRequestHandler):
 # ── 主函数 ──────────────────────────────────────────────────────────
 def main():
     srv = ThreadingHTTPServer(("0.0.0.0", LAUNCHER_PORT), _Handler)
-    print(f"[PTZ-Launcher] 轻量启动器运行中 → http://localhost:{LAUNCHER_PORT}/")
-    print(f"[PTZ-Launcher] Isaac Sim 内部端口：{ISAAC_PORT}（按需启动）")
-    print(f"[PTZ-Launcher] ONVIF 服务端点：")
+    print(f"[PTZ-Launcher] 启动器运行中 → 端口 {LAUNCHER_PORT}")
+    print(f"[PTZ-Launcher] 管理接口：")
+    print(f"[PTZ-Launcher]   GET  http://localhost:{LAUNCHER_PORT}/status")
+    print(f"[PTZ-Launcher]   POST http://localhost:{LAUNCHER_PORT}/start   启动 Isaac Sim 推流")
+    print(f"[PTZ-Launcher]   POST http://localhost:{LAUNCHER_PORT}/stop    停止 Isaac Sim 推流")
+    print(f"[PTZ-Launcher]   GET  http://localhost:{LAUNCHER_PORT}/log     Isaac 启动日志")
+    print(f"[PTZ-Launcher] ONVIF 端点：")
     print(f"[PTZ-Launcher]   POST http://localhost:{LAUNCHER_PORT}/onvif/device_service")
     print(f"[PTZ-Launcher]   POST http://localhost:{LAUNCHER_PORT}/onvif/media_service")
     print(f"[PTZ-Launcher]   POST http://localhost:{LAUNCHER_PORT}/onvif/ptz_service")
     print(f"[PTZ-Launcher]   GET  http://localhost:{LAUNCHER_PORT}/onvif-snap.jpg")
-    print(f"[PTZ-Launcher] 在 Web 界面点击 '开始推流' 启动 Isaac Sim")
+    print(f"[PTZ-Launcher] Isaac Sim 内部端口：{ISAAC_PORT}（按需启动）")
+    print(f"[PTZ-Launcher] WebSocket 视频流端口：{WS_PORT}（Isaac Sim 运行时生效）")
     print(f"[PTZ-Launcher] 按 Ctrl-C 停止（同时停止 Isaac Sim）")
     try:
         srv.serve_forever()

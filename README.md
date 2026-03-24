@@ -218,8 +218,7 @@ camera_prim:  /World/CameraRig/CamTilt/Camera  # 推流相机路径
 resolution:   [1920, 1080]
 fps:          25
 bitrate:      "4M"
-rtsp_enabled: true           # false 时仅 MJPEG，不启动 ffmpeg/mediamtx
-mjpeg_quality: 80            # JPEG 质量 50~95
+rtsp_enabled: true           # false 时仅提供 /snapshot.jpg 快照，不启动 ffmpeg/mediamtx
 focal_length_1x: 18.14756    # 1× 基准焦距（mm），32× 时自动 ×32
 ```
 

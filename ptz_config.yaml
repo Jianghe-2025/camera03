@@ -1,12 +1,14 @@
-# PTZ 安防球机 RTSP 流输出配置
-# 与 PTZ_SecurityDome.usda 和 ptz_rtsp_stream.py 放在同一目录即可整体复制到其他工程
+# PTZ 虚拟相机推流配置（ONVIF + RTSP 版）
+# 与 ptz_rtsp_stream.py / ptz_launcher.py 放在同一目录即可整体复制到其他工程
 # ---------------------------------------------------------------------------
 
 # ── 服务端口配置 ──────────────────────────────────────────────────────────
-# 启动器（轻量 Web UI，始终运行）监听端口；浏览器访问此端口
+# 启动器（ONVIF + 管理接口，始终运行）监听端口
 launcher_port: 8080
 # Isaac Sim 内部 HTTP 端口（由启动器按需拉起，不占 GPU 时不运行）
 ctrl_port: 8081
+# Isaac Sim 内嵌 WebSocket 视频流端口（纯 stdlib 实现，无需额外依赖）
+ws_port: 8765
 # Isaac Sim (python.sh) 路径，供启动器调用
 python_sh: /home/uniubi/projects/issac/.isaac_sim_unzip/python.sh
 
@@ -16,13 +18,12 @@ scene_path: ./V4.0.usd
 # 场景中 PTZ 相机 Prim 的完整路径
 # V4.0.usd：裸 Camera + CameraRig 控制层级（Z-up，米）
 # V3.0.usd：camera_prim: /World/PTZ/Pan/Tilt/Camera
-# V2.0.usd：camera_prim: /World/Xform/Pan/Tilt/Camera
 camera_prim: /World/CameraRig/CamTilt/Camera
 
 # 输出 RTSP 流地址
 rtsp_url: rtsp://localhost:8554/ptz_cam
 
-# 视频分辨率 [宽, 高]，建议与 PTZ_SecurityDome.usda 中 RenderProduct 分辨率一致
+# 视频分辨率 [宽, 高]
 resolution: [1920, 1080]
 
 # 输出帧率（fps）
@@ -31,21 +32,14 @@ fps: 15
 # ffmpeg 视频码率
 bitrate: "4M"
 
-# 仿真步进频率（Hz），物理步进速率
-# skip_frames = round(sim_hz / fps) = round(60/15) = 4
-# 即每 4 帧只渲染 1 帧，其余 3 帧 render=False 不触发 GPU
+# 仿真步进频率（Hz）
 sim_hz: 60
 
-# RTSP 推流开关（true=同时输出 RTSP 供 VLC/NVR 使用；false=仅 MJPEG 浏览器预览）
-# 关闭后无需 ffmpeg 和 MediaMTX，启动更快，延迟更低
+# RTSP 推流开关（true=输出 RTSP 供 VLC/NVR 接入；false=仅提供 snapshot 快照）
 rtsp_enabled: true
 
-# MJPEG 画质（50~95，越高越清晰但带宽越大）
-# 本地网络建议 75~85；局域网可提高到 90
-mjpeg_quality: 80
-
 # 1× 广角基准焦距（mm），与场景中 Camera 的 focalLength 一致
-# 32× 变焦时焦距 = focal_length_1x * 32
+# 32× 变焦时：focalLength = focal_length_1x * 32
 focal_length_1x: 18.14756
 
 # MediaMTX RTSP 服务器配置

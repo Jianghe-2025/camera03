@@ -82,9 +82,9 @@ fps          = args.fps     or cfg.get("fps", 25)
 resolution   = tuple(cfg.get("resolution", [1920, 1080]))
 bitrate      = cfg.get("bitrate", "4M")
 sim_hz       = cfg.get("sim_hz", 60)
-mediamtx_cfg  = cfg.get("mediamtx", {})
+mediamtx_cfg    = cfg.get("mediamtx", {})
 rtsp_enabled    = cfg.get("rtsp_enabled",    True)
-mjpeg_quality   = cfg.get("mjpeg_quality",   80)
+WS_PORT         = int(cfg.get("ws_port", 8765))
 FOCAL_LENGTH_1X = float(cfg.get("focal_length_1x", 18.14756))
 
 W, H = resolution
@@ -93,6 +93,7 @@ skip_frames = max(1, round(sim_hz / fps))
 print(f"[PTZ-RTSP] 配置：场景={scene_path}")
 print(f"[PTZ-RTSP]       相机Prim={camera_prim}")
 print(f"[PTZ-RTSP]       RTSP URL={rtsp_url}  分辨率={W}x{H}  fps={fps}")
+print(f"[PTZ-RTSP]       WebSocket 端口={WS_PORT}")
 
 # 启动 SimulationApp（headless 模式）
 from isaacsim import SimulationApp
@@ -110,15 +111,17 @@ sim_app = SimulationApp({
 # ============================================================
 # 第二阶段：所有 omni.* 导入在 SimulationApp 启动后进行
 # ============================================================
-import io as _io
+import base64
+import hashlib
 import json
 import signal
+import socket as _socket
+import struct
 import subprocess
 import tarfile
 import threading
 import time
-import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import carb
 import numpy as np
@@ -189,38 +192,29 @@ _scene_lock  = threading.Lock()
 _scene_dirty = threading.Event()
 _chosen_worker: int = 1   # 当 workers=1 时随机显示的工人编号（1 或 2）
 
-# ── MJPEG 帧缓冲（主循环写，HTTP handler 读）────────────────
-_mjpeg = {"jpeg": None, "frame_id": 0}
-_mjpeg_lock = threading.Lock()
-_jpeg_encode_fn = None   # 在 main() 里初始化
+# ── 最新渲染帧缓存（用于 /snapshot.jpg 按需抓帧）────────────
+_latest_rgba = None
+_latest_rgba_lock = threading.Lock()
 
 
-def _init_jpeg_encoder(quality: int):
-    """按优先级检测 JPEG 编码器：Pillow → OpenCV → 不可用。"""
+def _encode_jpeg_once(rgba, quality: int = 80) -> bytes:
+    """将 RGBA 帧编码为 JPEG bytes。优先 Pillow，其次 OpenCV。"""
     try:
-        from PIL import Image as _PILImg  # noqa
-        def _enc(rgba):
-            img = _PILImg.fromarray(rgba[:, :, :3])
-            buf = _io.BytesIO()
-            img.save(buf, "JPEG", quality=quality, optimize=False)
-            return buf.getvalue()
-        print("[PTZ-RTSP] MJPEG 编码器：Pillow ✓")
-        return _enc
+        import io as _io
+        from PIL import Image as _PILImg
+        img = _PILImg.fromarray(rgba[:, :, :3])
+        buf = _io.BytesIO()
+        img.save(buf, "JPEG", quality=quality, optimize=False)
+        return buf.getvalue()
     except ImportError:
         pass
     try:
-        import cv2 as _cv2  # noqa
-        _params = [_cv2.IMWRITE_JPEG_QUALITY, quality]
-        def _enc(rgba):
-            bgr = rgba[:, :, :3][:, :, ::-1].copy()
-            ok, buf = _cv2.imencode(".jpg", bgr, _params)
-            return buf.tobytes() if ok else None
-        print("[PTZ-RTSP] MJPEG 编码器：OpenCV ✓")
-        return _enc
+        import cv2 as _cv2
+        bgr = rgba[:, :, :3][:, :, ::-1].copy()
+        ok, buf = _cv2.imencode(".jpg", bgr, [_cv2.IMWRITE_JPEG_QUALITY, quality])
+        return buf.tobytes() if ok else None
     except ImportError:
-        pass
-    print("[PTZ-RTSP] ⚠ 未找到 PIL/OpenCV，MJPEG 不可用（仅 RTSP）")
-    return None
+        return None
 
 
 def _apply_ptz_state(stage) -> None:
@@ -343,21 +337,6 @@ class _PTZHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
-            html_path = os.path.join(script_dir, "ptz_web_control.html")
-            if os.path.isfile(html_path):
-                data = open(html_path, "rb").read()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self._cors()
-                self.end_headers()
-                self.wfile.write(data)
-            else:
-                self.send_response(404)
-                self.end_headers()
-                self.wfile.write(b"ptz_web_control.html not found")
-            return
-
         if self.path == "/status":
             with _ptz_lock:
                 body = json.dumps(_ptz_state).encode()
@@ -378,41 +357,16 @@ class _PTZHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        # MJPEG 连续流 —— 浏览器一次连接持续接收帧（低延迟）
-        if self.path.startswith("/stream.mjpeg"):
-            self.send_response(200)
-            self.send_header("Content-Type",
-                             "multipart/x-mixed-replace; boundary=ptzframe")
-            self.send_header("Cache-Control", "no-cache, no-store")
-            self.send_header("Connection",    "close")
-            self._cors()
-            self.end_headers()
-            last_fid = -1
-            try:
-                while _running:
-                    with _mjpeg_lock:
-                        fid = _mjpeg["frame_id"]
-                        jpg = _mjpeg["jpeg"]
-                    if fid == last_fid or jpg is None:
-                        time.sleep(0.015)   # ~67fps 上限轮询
-                        continue
-                    last_fid = fid
-                    self.wfile.write(
-                        b"--ptzframe\r\n"
-                        b"Content-Type: image/jpeg\r\n"
-                        b"Content-Length: " + str(len(jpg)).encode() + b"\r\n\r\n"
-                        + jpg + b"\r\n"
-                    )
-                    self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                pass
-            return
-
-        # 单帧快照（Safari 等不支持 MJPEG 流时的降级方案）
+        # 单帧快照（供 ONVIF GetSnapshotUri 调用）
         if self.path.startswith("/snapshot.jpg"):
-            with _mjpeg_lock:
-                jpg = _mjpeg["jpeg"]
-            if jpg is None:
+            with _latest_rgba_lock:
+                rgba = _latest_rgba
+            if rgba is None:
+                self.send_response(503)
+                self.end_headers()
+                return
+            jpg = _encode_jpeg_once(rgba)
+            if not jpg:
                 self.send_response(503)
                 self.end_headers()
                 return
@@ -498,12 +452,176 @@ class _PTZHandler(BaseHTTPRequestHandler):
 
 
 def _start_control_server() -> None:
-    """在 daemon 线程中启动 PTZ 控制 HTTP 服务，不阻塞仿真主循环。"""
+    """在 daemon 线程中启动 PTZ 控制 HTTP 服务（内部接口），不阻塞仿真主循环。"""
     srv = ThreadingHTTPServer(("0.0.0.0", _CTRL_PORT), _PTZHandler)
     t   = threading.Thread(target=srv.serve_forever, daemon=True, name="ptz-ctrl")
     t.start()
-    print(f"[PTZ-RTSP] 控制面板已启动 → http://localhost:{_CTRL_PORT}/")
-    print(f"[PTZ-RTSP]   用浏览器打开上面的地址即可实时控制云台和变焦")
+    print(f"[PTZ-RTSP] 内部控制接口已启动 → http://localhost:{_CTRL_PORT}/")
+    print(f"[PTZ-RTSP]   /status  /snapshot.jpg  /control  /scene/*")
+
+
+# ============================================================
+# WebSocket 广播服务器（纯 stdlib，无需额外依赖）
+# 协议：每帧发送一条 binary message，内容为 JPEG bytes。
+# ============================================================
+
+_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def _ws_encode_frame(payload: bytes) -> bytes:
+    """将 payload 封装为 WebSocket binary 帧（FIN=1, opcode=0x2）。"""
+    n = len(payload)
+    if n <= 125:
+        header = bytes([0x82, n])
+    elif n <= 65535:
+        header = struct.pack(">BBH", 0x82, 126, n)
+    else:
+        header = struct.pack(">BBQ", 0x82, 127, n)
+    return header + payload
+
+
+def _ws_encode_close() -> bytes:
+    """WebSocket 关闭帧（opcode=0x8）。"""
+    return bytes([0x88, 0x00])
+
+
+class _WSBroadcaster:
+    """
+    极简 WebSocket 广播服务器（纯 stdlib）。
+    - 接受客户端连接，完成握手后加入广播集合。
+    - broadcast(jpeg_bytes) 将一帧 JPEG 发给所有在线客户端。
+    - 客户端断开时自动从集合移除。
+    """
+
+    def __init__(self, host: str = "0.0.0.0", port: int = 8765):
+        self._port    = port
+        self._clients: set = set()
+        self._lock    = threading.Lock()
+        self._srv     = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        self._srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        self._srv.bind((host, port))
+        self._srv.listen(20)
+        threading.Thread(target=self._accept_loop, daemon=True, name="ws-accept").start()
+        print(f"[PTZ-WS] WebSocket 广播服务已启动 → ws://0.0.0.0:{port}/")
+        print(f"[PTZ-WS]   协议：每帧发送 binary JPEG（无需任何库，浏览器原生支持）")
+
+    def _accept_loop(self) -> None:
+        while True:
+            try:
+                conn, addr = self._srv.accept()
+                threading.Thread(
+                    target=self._handle_client, args=(conn, addr),
+                    daemon=True, name=f"ws-client-{addr[1]}"
+                ).start()
+            except Exception:
+                break
+
+    def _handle_client(self, conn: _socket.socket, addr) -> None:
+        """完成 HTTP→WebSocket 握手，然后保持连接直到断开。"""
+        try:
+            raw = b""
+            # 读取 HTTP 握手请求（最多等 4096 bytes）
+            conn.settimeout(5.0)
+            while b"\r\n\r\n" not in raw:
+                chunk = conn.recv(1024)
+                if not chunk:
+                    return
+                raw += chunk
+
+            # 解析 Sec-WebSocket-Key
+            key = ""
+            for line in raw.decode("utf-8", errors="replace").split("\r\n"):
+                if line.lower().startswith("sec-websocket-key:"):
+                    key = line.split(":", 1)[1].strip()
+            if not key:
+                conn.close()
+                return
+
+            # 计算 Sec-WebSocket-Accept
+            accept = base64.b64encode(
+                hashlib.sha1((key + _WS_GUID).encode()).digest()
+            ).decode()
+
+            # 发送 101 Switching Protocols
+            resp = (
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Accept: {accept}\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
+                "\r\n"
+            )
+            conn.sendall(resp.encode())
+            print(f"[PTZ-WS] 客户端已连接：{addr}")
+
+            # 注册到广播集合
+            with self._lock:
+                self._clients.add(conn)
+
+            # 保持连接并处理客户端发来的控制帧（ping/close）
+            conn.settimeout(60.0)
+            while True:
+                try:
+                    header = conn.recv(2)
+                    if len(header) < 2:
+                        break
+                    opcode = header[0] & 0x0F
+                    if opcode == 0x8:   # Close
+                        conn.sendall(_ws_encode_close())
+                        break
+                    if opcode == 0x9:   # Ping → Pong
+                        length = header[1] & 0x7F
+                        payload = conn.recv(length) if length else b""
+                        conn.sendall(bytes([0x8A, length]) + payload)
+                        continue
+                    # 忽略其他客户端数据帧（本服务仅单向推送）
+                    length = header[1] & 0x7F
+                    if length == 126:
+                        length = struct.unpack(">H", conn.recv(2))[0]
+                    elif length == 127:
+                        length = struct.unpack(">Q", conn.recv(8))[0]
+                    if length > 0:
+                        conn.recv(length)   # 丢弃 payload
+                except (_socket.timeout, ConnectionResetError, BrokenPipeError):
+                    break
+        except Exception as exc:
+            print(f"[PTZ-WS] 客户端 {addr} 异常断开：{exc}")
+        finally:
+            with self._lock:
+                self._clients.discard(conn)
+            try:
+                conn.close()
+            except Exception:
+                pass
+            print(f"[PTZ-WS] 客户端已断开：{addr}")
+
+    def broadcast(self, jpeg: bytes) -> None:
+        """将一帧 JPEG 广播给所有已连接的 WebSocket 客户端。"""
+        if not jpeg:
+            return
+        frame = _ws_encode_frame(jpeg)
+        with self._lock:
+            dead: set = set()
+            for conn in self._clients:
+                try:
+                    conn.sendall(frame)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    dead.add(conn)
+            self._clients -= dead
+
+    @property
+    def client_count(self) -> int:
+        with self._lock:
+            return len(self._clients)
+
+
+_ws_broadcaster: "_WSBroadcaster | None" = None
+
+
+def _start_ws_server(port: int) -> "_WSBroadcaster":
+    global _ws_broadcaster
+    _ws_broadcaster = _WSBroadcaster(port=port)
+    return _ws_broadcaster
 
 
 # ============================================================
@@ -717,25 +835,24 @@ def _cleanup():
 # ============================================================
 
 def main():
-    global _ffmpeg_proc, _mediamtx_proc, _jpeg_encode_fn
+    global _ffmpeg_proc, _mediamtx_proc
 
     # --- 渲染限速（SimulationApp 启动后立即设置，减少 GPU 空转）---
     _apply_render_throttle(fps)
 
-    # --- 初始化 MJPEG JPEG 编码器 ---
-    _jpeg_encode_fn = _init_jpeg_encoder(mjpeg_quality)
-
-    # --- 启动 PTZ 控制 HTTP API（含 MJPEG 端点）---
+    # --- 启动 PTZ 控制 HTTP API（内部接口）---
     _start_control_server()
 
-    # --- RTSP 管道（可选）---
+    # --- 启动 WebSocket 广播服务器 ---
+    _start_ws_server(WS_PORT)
+
+    # --- RTSP 管道 ---
     if rtsp_enabled:
         mtx_bin = _ensure_mediamtx()
         _mediamtx_proc = _start_mediamtx(mtx_bin)
         _ffmpeg_proc = _start_ffmpeg(rtsp_url, W, H, fps, bitrate)
     else:
-        print(f"[PTZ-RTSP] RTSP 已禁用，仅 MJPEG 预览")
-        print(f"[PTZ-RTSP] 预览地址：http://localhost:{_CTRL_PORT}/stream.mjpeg")
+        print(f"[PTZ-RTSP] RTSP 已禁用，仅提供 /snapshot.jpg 快照")
 
     # --- 加载 USD 场景 ---
     print(f"[PTZ-RTSP] 加载场景：{scene_path}")
@@ -783,6 +900,7 @@ def main():
 
     print(f"[PTZ-RTSP] 开始推流 → {rtsp_url}")
     print(f"[PTZ-RTSP] 客户端命令：vlc {rtsp_url}  或  ffplay {rtsp_url} -rtsp_transport tcp")
+    print(f"[PTZ-RTSP] WebSocket 视频流 → ws://localhost:{WS_PORT}/  （每帧 binary JPEG）")
     print("[PTZ-RTSP] 按 Ctrl-C 停止。\n")
 
     # --- 主仿真 + 推流循环 ---
@@ -814,21 +932,24 @@ def main():
             rgba = annotator.get_data()  # shape (H, W, 4), dtype uint8
 
             if rgba is not None and rgba.size > 0:
-                # 验证 shape 与配置分辨率一致，不一致时 resize 避免花屏
+                # 验证 shape 与配置分辨率一致，不一致时 resize
                 if rgba.shape[:2] != (H, W):
                     rgba = np.ascontiguousarray(
                         np.resize(rgba, (H, W, rgba.shape[2] if rgba.ndim == 3 else 4))
                     )
 
-                # ① MJPEG 帧缓冲更新（低延迟浏览器预览）
-                if _jpeg_encode_fn is not None:
-                    jpg = _jpeg_encode_fn(rgba)
-                    if jpg:
-                        with _mjpeg_lock:
-                            _mjpeg["jpeg"]     = jpg
-                            _mjpeg["frame_id"] += 1
+                # ① 更新快照缓存（供 /snapshot.jpg 按需抓帧）
+                with _latest_rgba_lock:
+                    global _latest_rgba
+                    _latest_rgba = rgba
 
-                # ② RTSP 推流（可选，供 VLC / NVR 外部接入）
+                # ② WebSocket 广播（仅在有客户端连接时编码 JPEG，避免无谓 CPU 开销）
+                if _ws_broadcaster is not None and _ws_broadcaster.client_count > 0:
+                    _ws_jpeg = _encode_jpeg_once(rgba, quality=75)
+                    if _ws_jpeg:
+                        _ws_broadcaster.broadcast(_ws_jpeg)
+
+                # ③ RTSP 推流（通过 ffmpeg → mediamtx）
                 if rtsp_enabled and _ffmpeg_proc is not None \
                         and _ffmpeg_proc.poll() is None:
                     raw = np.ascontiguousarray(rgba, dtype=np.uint8).tobytes()
@@ -837,15 +958,14 @@ def main():
                         _ffmpeg_proc.stdin.flush()
                         pushed_frames += 1
                     except BrokenPipeError:
-                        print("[PTZ-RTSP] ffmpeg 管道已断开（RTSP 停止，MJPEG 继续）")
+                        print("[PTZ-RTSP] ffmpeg 管道已断开，RTSP 停止")
                         _ffmpeg_proc = None
 
                 # 每 5 秒打印一次统计
                 now = time.time()
                 if now - last_stat_time >= 5.0:
                     elapsed = now - last_stat_time
-                    actual_fps = pushed_frames / elapsed if rtsp_enabled else \
-                        _mjpeg["frame_id"] / elapsed
+                    actual_fps = pushed_frames / elapsed
                     print(f"[PTZ-RTSP] 运行中... 帧率={actual_fps:.1f} fps  仿真帧={frame_idx}")
                     pushed_frames = 0
                     last_stat_time = now
