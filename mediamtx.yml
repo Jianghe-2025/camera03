@@ -1,4 +1,4 @@
-# MediaMTX v1.x 配置 - PTZ RTSP 流输出专用
+# MediaMTX v1.x 配置 - PTZ RTSP + LL-HLS 流输出
 
 logLevel: warn
 logDestinations: [stdout]
@@ -7,12 +7,15 @@ logDestinations: [stdout]
 rtsp: true
 rtspAddress: :8554
 
-# HLS 服务（浏览器 Web 控制台用）
+# HLS 服务（浏览器 hls.js 播放）
 hls: true
 hlsAddress: :8888
+hlsVariant: lowLatency
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
 hlsAllowOrigin: '*'
 
-# 关闭其他协议（避免端口占用）
+# 关闭其他协议
 rtmp: false
 webrtc: false
 srt: false
