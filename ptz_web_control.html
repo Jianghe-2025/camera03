@@ -1268,8 +1268,8 @@ setInterval(tick, 1000); tick();
 // ── 视频流播放器（WS-FLV 优先，降级到快照轮询）──────────
 const video       = document.getElementById('stream-video');
 const placeholder = document.getElementById('placeholder');
-const WS_FLV_URL  = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${HOST}:${location.protocol === 'https:' ? '8443' : '8080'}/ws-flv`;
-const SNAP_URL    = `http://${HOST}:8080/onvif-snap.jpg`;
+const WS_FLV_URL  = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws-flv`;
+const SNAP_URL    = `${location.protocol}//${location.host}/onvif-snap.jpg`;
 
 let _flvPlayer  = null;
 let _snapTimer  = null;
