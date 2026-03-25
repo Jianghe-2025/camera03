@@ -75,14 +75,14 @@ ONVIF 使用归一化坐标，Isaac Sim 使用物理单位（度 / 倍率）。
 | 维度 | ONVIF 范围 | Isaac 范围 | 换算公式 |
 |------|-----------|-----------|---------|
 | Pan（水平）  | [-1, 1]  | [-170°, 170°] | `pan_deg = onvif_pan × 170.0` |
-| Tilt（俯仰） | [-1, 1]  | [-90°, +30°]  | `tilt_deg = clamp(onvif_tilt × 90.0, -90, 30)` |
+| Tilt（俯仰） | [-1, 1]  | [-90°, +30°]  | `tilt_deg = clamp(-60.0 × onvif_tilt - 30.0, -90, 30)` |
 | Zoom（变焦） | [0, 1]   | [1×, 32×]     | `zoom_x = 1.0 + onvif_zoom × 31.0` |
 
 反向换算（GetStatus 输出）：
 
 ```
 onvif_pan  = pan_deg  / 170.0
-onvif_tilt = tilt_deg / 90.0
+onvif_tilt = -(2.0 * (tilt_deg - (-90.0)) / (30.0 - (-90.0)) - 1.0)
 onvif_zoom = (zoom_x - 1.0) / 31.0
 ```
 
