@@ -251,7 +251,7 @@ def start_isaac() -> dict:
 
         log_file = open(ISAAC_LOG, "w", encoding="utf-8", buffering=1)
         cmd = [
-            PYTHON_SH, STREAM_SCRIPT,
+            PYTHON_SH, "-u", STREAM_SCRIPT,
             "--config", args.config,
             "--ctrl-port", str(ISAAC_PORT),
         ]
@@ -2015,10 +2015,15 @@ def main():
     # Launcher 重启后同步 Isaac Sim 实际运行状态
     _sync_isaac_state_on_startup()
 
-    # 启动 WebSocket JPEG 帧拉取后台线程
-    threading.Thread(target=_ws_frame_fetcher, daemon=True, name="ws-fetcher").start()
-    # 启动 WebSocket FLV+H.264 广播器线程
-    threading.Thread(target=_flv_broadcaster, daemon=True, name="flv-broadcaster").start()
+    # preview_enabled=false 时关闭预览线程，减少不必要的轮询与 GIL 竞争
+    _preview_enabled = cfg.get("preview_enabled", True)
+    if _preview_enabled:
+        # 启动 WebSocket JPEG 帧拉取后台线程
+        threading.Thread(target=_ws_frame_fetcher, daemon=True, name="ws-fetcher").start()
+        # 启动 WebSocket FLV+H.264 广播器线程
+        threading.Thread(target=_flv_broadcaster, daemon=True, name="flv-broadcaster").start()
+    else:
+        print("[PTZ-Launcher] preview_enabled=false，ws-fetcher 和 flv-broadcaster 已禁用")
     # 启动 WS-Discovery UDP 多播监听线程（局域网 ONVIF 自动发现）
     threading.Thread(target=_wsd_listener, daemon=True, name="wsd-discovery").start()
 
