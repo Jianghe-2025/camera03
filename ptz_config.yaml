@@ -58,3 +58,31 @@ mediamtx:
   auto_download: true
   # GitHub Release 版本标签
   version: "v1.17.0"
+
+# PTZ 预置位（固定 1~5 槽位，launcher 保存后会回写本文件）
+presets:
+  "1":
+    name: 默认位
+    pan: -56.0
+    tilt: 9.0
+    zoom: 1.0
+  "2":
+    name: 水平正视
+    pan: 0.0
+    tilt: 0.0
+    zoom: 1.0
+  "3":
+    name: 左90°
+    pan: -90.0
+    tilt: -45.0
+    zoom: 1.0
+  "4":
+    name: 右90°
+    pan: 90.0
+    tilt: -45.0
+    zoom: 1.0
+  "5":
+    name: 俯视
+    pan: 0.0
+    tilt: 30.0
+    zoom: 1.0

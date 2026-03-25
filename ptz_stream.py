@@ -130,8 +130,8 @@ from isaacsim.core.api import World
 _CTRL_PORT = args.ctrl_port or cfg.get("ctrl_port", 8080)
 
 _ptz_state = {
-    "pan":  0.0,     # -170 ~ +170 度
-    "tilt": -45.0,   # -90 ~ +30 度
+    "pan":  -56.0,   # -170 ~ +170 度
+    "tilt": 9.0,     # -90 ~ +30 度
     "zoom": 1.0,     # 1× ~ 32×
 }
 _ptz_lock    = threading.Lock()
