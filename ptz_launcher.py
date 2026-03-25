@@ -421,8 +421,15 @@ _ONVIF_PTZ_NODE      = "PTZNode_1"
 _soap_tls = threading.local()
 
 # 坐标换算常量
-_PAN_SCALE  = 170.0
-_TILT_SCALE = 90.0
+_PAN_MIN   = -170.0
+_PAN_MAX   = 170.0
+_PAN_SCALE = 170.0
+
+_TILT_MIN = -90.0
+_TILT_MAX = 30.0
+
+_ZOOM_MIN   = 1.0
+_ZOOM_MAX   = 32.0
 _ZOOM_SCALE = 31.0
 
 
@@ -435,25 +442,33 @@ def _norm_to_pan(norm: float) -> float:
 
 
 def _pan_to_norm(pan_deg: float) -> float:
-    return _clamp(pan_deg, -170.0, 170.0) / _PAN_SCALE
+    return _clamp(pan_deg, _PAN_MIN, _PAN_MAX) / _PAN_SCALE
 
 
 def _norm_to_tilt(norm: float) -> float:
     norm = _clamp(norm, -1.0, 1.0)
-    return _clamp(-60.0 * norm - 30.0, -90.0, 30.0)
+    return _clamp(
+        _TILT_MIN + (1.0 - norm) * (_TILT_MAX - _TILT_MIN) / 2.0,
+        _TILT_MIN,
+        _TILT_MAX,
+    )
 
 
 def _tilt_to_norm(tilt_deg: float) -> float:
-    tilt_deg = _clamp(tilt_deg, -90.0, 30.0)
-    return _clamp(-(2.0 * (tilt_deg - (-90.0)) / (30.0 - (-90.0)) - 1.0), -1.0, 1.0)
+    tilt_deg = _clamp(tilt_deg, _TILT_MIN, _TILT_MAX)
+    return _clamp(
+        -(2.0 * (tilt_deg - _TILT_MIN) / (_TILT_MAX - _TILT_MIN) - 1.0),
+        -1.0,
+        1.0,
+    )
 
 
 def _norm_to_zoom(norm: float) -> float:
-    return 1.0 + _clamp(norm, 0.0, 1.0) * _ZOOM_SCALE
+    return _ZOOM_MIN + _clamp(norm, 0.0, 1.0) * _ZOOM_SCALE
 
 
 def _zoom_to_norm(zoom_x: float) -> float:
-    return (_clamp(zoom_x, 1.0, 32.0) - 1.0) / _ZOOM_SCALE
+    return (_clamp(zoom_x, _ZOOM_MIN, _ZOOM_MAX) - _ZOOM_MIN) / _ZOOM_SCALE
 
 # RTSP 端口（来自 mediamtx 配置，默认 8554）
 _RTSP_PORT = cfg.get("mediamtx", {}).get("port", 8554)
