@@ -13,6 +13,7 @@ venv/
 *.log
 *.tmp
 *.bak
+nohup.out
 
 # 大体积二进制（可选：需时再移出忽略）
 *.usdz

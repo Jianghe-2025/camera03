@@ -5,7 +5,7 @@ logDestinations: [stdout]
 
 # RTSP 服务（ffmpeg 推流端）
 rtsp: true
-rtspAddress: :8554
+rtspAddress: :6674
 
 # HLS 服务已关闭（浏览器统一走 WS-FLV）
 hls: false

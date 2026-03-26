@@ -4,14 +4,14 @@
 
 # ── 服务端口配置 ──────────────────────────────────────────────────────────
 # 启动器（轻量 Web UI，始终运行）监听端口；浏览器访问此端口
-launcher_port: 8080
+launcher_port: 6670
 # Isaac Sim 内部 HTTP 端口（由启动器按需拉起，不占 GPU 时不运行）
-ctrl_port: 8081
-# Isaac Sim (python.sh) 路径，供启动器调用
-python_sh: /home/uniubi/miniconda3/envs/env_isaaclab/bin/python3
+ctrl_port: 6671
+# Isaac Sim 5.1.0 独立包（官方 Quick Install）解压目录下的 python.sh
+python_sh: /home/uniubi/isaacsim/python.sh
 
-
-# 要加载的 USD 场景文件（相对路径或绝对路径）
+# 场景：V4.0.usd 已通过 payload 引用同目录下 DiaoLan_ChangJing_2026.03.18.usdz（工地场景），并包含 PTZ 用的 CameraRig。
+# 若只把 scene_path 改成 .usdz，将缺少 CameraRig，推流相机路径需另行 setup；一般保持 V4.0.usd 即可。
 scene_path: ./V4.0.usd
 
 # 场景中 PTZ 相机 Prim 的完整路径
@@ -20,8 +20,8 @@ scene_path: ./V4.0.usd
 # V2.0.usd：camera_prim: /World/Xform/Pan/Tilt/Camera
 camera_prim: /World/CameraRig/CamTilt/Camera
 
-# 输出 RTSP 流地址
-rtsp_url: rtsp://localhost:8554/ptz_cam
+# 输出 RTSP 流地址（与 mediamtx.port、mediamtx.yml 中 rtspAddress 一致）
+rtsp_url: rtsp://localhost:6674/ptz_cam
 
 # 视频分辨率 [宽, 高]
 # 性能优先档：960x540；质量档：1280x720；高质量：1920x1080
@@ -45,7 +45,7 @@ rtsp_enabled: true
 # 预览链开关
 # false = 关闭 MJPEG 编码、ws-flv 广播、ws-fetcher 轮询，仅保留 RTSP + ONVIF/PTZ
 # true  = 同时开启网页预览（ws-flv / MJPEG）和 RTSP，资源占用更高
-preview_enabled: false
+preview_enabled: true
 
 # MJPEG 画质（50~95，越高越清晰但带宽越大）
 # 本地网络建议 75~85；局域网可提高到 90
@@ -79,36 +79,8 @@ mediamtx:
   # mediamtx 二进制路径（相对或绝对）；不存在时脚本自动下载
   path: ./mediamtx
   # RTSP 监听端口
-  port: 8554
+  port: 6674
   # 自动从 GitHub 下载 mediamtx（无法访问外网时设为 false，需提前手动放置二进制）
   auto_download: true
   # GitHub Release 版本标签
   version: "v1.17.0"
-
-# PTZ 预置位（固定 1~5 槽位，launcher 保存后会回写本文件）
-presets:
-  "1":
-    name: 默认位
-    pan: -56.0
-    tilt: 9.0
-    zoom: 1.0
-  "2":
-    name: 水平正视
-    pan: 0.0
-    tilt: 0.0
-    zoom: 1.0
-  "3":
-    name: 左90°
-    pan: -90.0
-    tilt: -45.0
-    zoom: 1.0
-  "4":
-    name: 右90°
-    pan: 90.0
-    tilt: -45.0
-    zoom: 1.0
-  "5":
-    name: 俯视
-    pan: 0.0
-    tilt: 30.0
-    zoom: 1.0

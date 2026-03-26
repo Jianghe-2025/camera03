@@ -6,24 +6,26 @@
 
 **第三方平台对接**（服务启停、拉流、PTZ 控制等完整 HTTP/RTSP 说明）见：**[docs/API.md](./docs/API.md)**。
 
+> **本机约定**：工程根目录为 `/home/uniubi/Desktop/camera03-main`。下文端口统一为 **667x**（6670 启动器、6671 Isaac 内置 HTTP、6672 TLS 代理、6674 RTSP；6673 预留 HLS）。若你尚未把 `ptz_config.yaml`、`mediamtx.yml` 改成相同端口，请先改配置再按本文命令操作，或临时把命令里的端口改成配置文件中的实际值。
+
 ---
 
 ## 系统架构
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  用户浏览器  http://localhost:8080                       │
+│  用户浏览器  http://localhost:6670                       │
 └──────────────────────┬──────────────────────────────────┘
                        │ HTTP
 ┌──────────────────────▼──────────────────────────────────┐
-│  ptz_launcher.py  :8080  (始终运行，GPU ≈ 0%)           │
+│  ptz_launcher.py  :6670  (始终运行，GPU ≈ 0%)           │
 │  • 服务 Web UI                                          │
 │  • 管理 Isaac Sim 子进程的启动 / 停止                    │
-│  • 代理 /control /scene/* /stream.mjpeg 到 :8081        │
+│  • 代理 /control /scene/* /stream.mjpeg 到 :6671        │
 └──────────────────────┬──────────────────────────────────┘
                        │ 按需启动（start_new_session）
 ┌──────────────────────▼──────────────────────────────────┐
-│  ptz_rtsp_stream.py  :8081  (Isaac Sim headless)        │
+│  ptz_stream.py  :6671  (Isaac Sim headless)             │
 │  • 加载 V4.0.usd 场景                                   │
 │  • Replicator RenderProduct 捕获相机画面                 │
 │  • MJPEG 推流（浏览器低延迟预览）                        │
@@ -32,7 +34,7 @@
 └────────────┬────────────────────┬───────────────────────┘
              │ stdin pipe         │ RTSP ANNOUNCE
 ┌────────────▼────────┐  ┌────────▼────────────────────────┐
-│  ffmpeg（H.264编码）│  │  mediamtx  :8554  RTSP Server   │
+│  ffmpeg（H.264编码）│  │  mediamtx  :6674  RTSP Server   │
 └─────────────────────┘  └─────────────────────────────────┘
 ```
 
@@ -45,10 +47,10 @@
 | 文件 | 类型 | 说明 |
 |------|------|------|
 | `ptz_launcher.py` | Python | 轻量启动器（系统入口，始终运行，无 GPU 占用） |
-| `ptz_rtsp_stream.py` | Python | Isaac Sim 推流主体（按需启动，含所有 PTZ / 场景控制逻辑） |
-| `ptz_rtsp_config.yaml` | 配置 | 端口、场景路径、分辨率、码率等全局配置 |
+| `ptz_stream.py` | Python | Isaac Sim 推流主体（按需启动，含所有 PTZ / 场景控制逻辑） |
+| `ptz_config.yaml` | 配置 | 端口、场景路径、分辨率、码率等全局配置 |
 | `ptz_web_control.html` | HTML | Web 控制台页面（由 launcher 提供服务） |
-| `mediamtx.yml` | 配置 | MediaMTX RTSP 服务器配置（启用 RTSP:8554 + HLS:8888） |
+| `mediamtx.yml` | 配置 | MediaMTX 配置（示例 RTSP **:6674**；当前仓库默认关闭 HLS，若开启可配 **:6673**） |
 | `mediamtx` | 二进制 | MediaMTX v1.17.0 可执行文件（.gitignore 忽略） |
 | `V4.0.usd` | USD 场景 | 当前使用的仿真场景（工地环境，Z-up，metersPerUnit=1） |
 | `setup_camera_v4.py` | Python | 一次性工具：为裸 Camera prim 创建 Pan/Tilt 控制层级 |
@@ -89,86 +91,104 @@
 
 ### 1. 启动轻量服务（始终运行）
 
-```bash
-cd /home/uniubi/xuanyuan/Camera03
+**解释器说明**：`ptz_launcher.py` 只需标准 **Python 3** 与 **PyYAML**（`pip install pyyaml`），不依赖 Isaac Sim。请勿使用不存在的虚拟环境路径（例如本机若无 `env_isaaclab`，则 `/home/uniubi/miniconda3/envs/env_isaaclab/bin/python3` 会报 *No such file*）。
 
-# 1) 清理旧进程（避免 8080 / 8081 / 8554 被占用）
+检测本机可用的 `python3` 与 PyYAML：
+
+```bash
+command -v python3
+python3 -c "import yaml; print('PyYAML OK')"
+```
+
+本仓库在当前机器上已验证：Miniconda **base** 可用 **`/home/uniubi/miniconda3/bin/python3`**（与 `(base)` 下默认 `python3` 一般为同一路径）。启动命令在工程目录内使用**相对路径**，避免写死重复绝对路径：
+
+```bash
+cd /home/uniubi/Desktop/camera03-main
+
+# 1) 清理旧进程（避免 6670 / 6671 / 6674 被占用）
 pkill -f 'ptz_launcher.py|ptz_stream.py|mediamtx' || true
 sleep 2
 
-# 2) 启动 Camera03 的 ONVIF / Web 入口
-nohup /home/uniubi/miniconda3/envs/env_isaaclab/bin/python3 \
-  /home/uniubi/xuanyuan/Camera03/ptz_launcher.py \
-  --config /home/uniubi/xuanyuan/Camera03/ptz_config.yaml \
+# 2) 启动本工程的 ONVIF / Web 入口（任选其一）
+#    A) 已激活 conda base 或系统 PATH 中 python3 可用时：
+nohup python3 ptz_launcher.py --config ./ptz_config.yaml \
   > /tmp/onvif_debug.log 2>&1 &
+#    B) 显式指定本机已存在的解释器（当前机器推荐，不依赖 env_isaaclab）：
+# nohup /home/uniubi/miniconda3/bin/python3 ptz_launcher.py --config ./ptz_config.yaml \
+#   > /tmp/onvif_debug.log 2>&1 &
 
-# 3) 检查 launcher 是否启动成功
-ss -ltnp | grep 8080
+# 3) 检查 launcher 是否启动成功（端口以 ptz_config.yaml 的 launcher_port 为准，常见为 8080 或 6670）
+ss -ltnp | grep -E ':6670|:8080'
 ps -ef | grep ptz_launcher.py | grep -v grep
 tail -n 50 /tmp/onvif_debug.log
 ```
 
-打开浏览器访问：**http://localhost:8080/**
+**Isaac Sim 推流**：点击「开始推流」时，子进程由 `ptz_config.yaml` 里的 **`python_sh`** 启动；必须指向你本机 **Isaac Sim 的 `python.sh`**（或官方文档要求的解释器）。仅有 Miniconda 的 `python3` 无法加载仿真，但与启动器能否先跑起来无关。
+
+打开浏览器访问：**`http://127.0.0.1:<launcher_port>/`**，其中 `<launcher_port>` 与 `ptz_config.yaml` 里 `launcher_port` 一致（仓库默认常为 **8080**）。
 
 ### 2. 在 Web UI 中启动 Isaac Sim 推流
 
 点击右上角 **"⏻ 开始推流"** 按钮。
 
-也可以直接用命令启动：
+也可以直接用命令启动（端口从配置读取，避免与 `ptz_config.yaml` 不一致）：
 
 ```bash
-curl -X POST http://127.0.0.1:8080/start
+cd /home/uniubi/Desktop/camera03-main
+LP=$(awk '/^launcher_port:/{print $2;exit}' ptz_config.yaml)
+curl -X POST "http://127.0.0.1:${LP}/start"
 
-# 检查 Isaac Sim / 推流侧是否已起来
-ss -ltnp | grep -E ':8081|:8554|:8888'
+# 检查 Isaac Sim / 推流侧是否已起来（ctrl_port / mediamtx 常见为 8081+8554 或文档约定的 6671+6674）
+ss -ltnp | grep -E ':8081|:8554|:6671|:6674'
 ps -ef | grep -E 'ptz_stream.py|mediamtx' | grep -v grep
-tail -n 100 /home/uniubi/xuanyuan/Camera03/isaac_stream.log
+tail -n 100 ./isaac_stream.log
 ```
 
 Isaac Sim 首次冷启动约需 **60~120 秒**，加载完成后 Web UI 自动切换为视频画面。
 
 ### 2.1 为 `ws-flv` 启动 HTTPS / WSS 代理
 
-当上层页面是 `https://` 时，浏览器通常不能直接连接 `ws://<host>:8080/ws-flv`。  
-可在服务器上额外启动一个 TLS 代理，将 `https://` / `wss://` 转发到本机 `8080`：
+当上层页面是 `https://` 时，浏览器通常不能直接连接 `ws://<host>:<launcher_port>/ws-flv`（`<launcher_port>` 见 `ptz_config.yaml`）。  
+可在服务器上额外启动一个 TLS 代理，将 `https://` / `wss://` 转发到本机同一端口：
 
 ```bash
-cd /home/uniubi/xuanyuan/Camera03
+cd /home/uniubi/Desktop/camera03-main
 
 # 1) 生成自签名证书（仅首次需要）
-mkdir -p /home/uniubi/xuanyuan/Camera03/certs
+mkdir -p /home/uniubi/Desktop/camera03-main/certs
 openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-  -keyout /home/uniubi/xuanyuan/Camera03/certs/camera03.key \
-  -out /home/uniubi/xuanyuan/Camera03/certs/camera03.crt \
+  -keyout /home/uniubi/Desktop/camera03-main/certs/camera03.key \
+  -out /home/uniubi/Desktop/camera03-main/certs/camera03.crt \
   -subj "/CN=192.168.61.171" \
   -addext "subjectAltName=IP:192.168.61.171"
 
-# 2) 启动 HTTPS / WSS 代理（8443 -> 8080）
-nohup /home/uniubi/miniconda3/envs/env_isaaclab/bin/python3 \
-  /home/uniubi/xuanyuan/Camera03/tls_tcp_proxy.py \
+# 2) 启动 HTTPS / WSS 代理（6672 -> launcher_port，仅需标准库，任意 python3 即可）
+UP=$(awk '/^launcher_port:/{print $2;exit}' ptz_config.yaml)
+nohup python3 tls_tcp_proxy.py \
   --listen-host 0.0.0.0 \
-  --listen-port 8443 \
+  --listen-port 6672 \
   --upstream-host 127.0.0.1 \
-  --upstream-port 8080 \
-  --cert /home/uniubi/xuanyuan/Camera03/certs/camera03.crt \
-  --key /home/uniubi/xuanyuan/Camera03/certs/camera03.key \
+  --upstream-port "$UP" \
+  --cert ./certs/camera03.crt \
+  --key ./certs/camera03.key \
   > /tmp/camera03_tls_proxy.log 2>&1 &
+# 若 PATH 中无 python3，可改为：nohup /home/uniubi/miniconda3/bin/python3 tls_tcp_proxy.py ...
 
 # 3) 检查端口与日志
-ss -ltnp | grep 8443
+ss -ltnp | grep 6672
 tail -n 50 /tmp/camera03_tls_proxy.log
 ```
 
 启动后可使用：
 
 ```text
-https://192.168.61.171:8443/
-wss://192.168.61.171:8443/ws-flv
+https://192.168.61.171:6672/
+wss://192.168.61.171:6672/ws-flv
 ```
 
 说明：
 - 自签名证书默认不会被浏览器信任，首次访问需要手动接受证书风险。
-- 当前用户无 `sudo`，因此默认使用 `8443`，不是 `443`。
+- 当前用户无 `sudo`，因此默认使用 `6672` 等非特权端口，不是 `443`。
 
 ### 3. 停止推流释放 GPU
 
@@ -178,10 +198,10 @@ wss://192.168.61.171:8443/ws-flv
 
 ```bash
 # VLC
-vlc rtsp://localhost:8554/ptz_cam
+vlc rtsp://localhost:6674/ptz_cam
 
 # ffplay
-ffplay rtsp://localhost:8554/ptz_cam -rtsp_transport tcp
+ffplay rtsp://localhost:6674/ptz_cam -rtsp_transport tcp
 ```
 
 ---
@@ -210,7 +230,7 @@ ffplay rtsp://localhost:8554/ptz_cam -rtsp_transport tcp
 
 ## HTTP API 参考
 
-所有接口均在 `http://localhost:8080`（launcher 代理）。
+所有接口均在 **`http://127.0.0.1:<launcher_port>`**（launcher 代理，`<launcher_port>` 同 `ptz_config.yaml`）。
 
 ### 启动器管理
 
@@ -273,11 +293,11 @@ GET /scene/state
 
 ---
 
-## 配置文件（ptz_rtsp_config.yaml）
+## 配置文件（ptz_config.yaml）
 
 ```yaml
-launcher_port: 8080          # launcher Web UI 端口
-ctrl_port:     8081          # Isaac Sim 内部 HTTP 端口
+launcher_port: 6670          # launcher Web UI 端口
+ctrl_port:     6671          # Isaac Sim 内部 HTTP 端口
 python_sh: /path/to/python.sh  # Isaac Sim python 解释器路径
 
 scene_path:   ./V4.0.usd    # 要加载的 USD 场景
@@ -288,7 +308,13 @@ fps:          25
 bitrate:      "4M"
 rtsp_enabled: true           # false 时仅提供 /snapshot.jpg 快照，不启动 ffmpeg/mediamtx
 focal_length_1x: 18.14756    # 1× 基准焦距（mm），32× 时自动 ×32
+rtsp_url: rtsp://localhost:6674/ptz_cam  # 与 mediamtx 监听端口一致
+
+mediamtx:
+  port: 6674                 # 与 mediamtx.yml 中 rtspAddress 一致（例如 :6674）
 ```
+
+另需在 `mediamtx.yml` 中将 `rtspAddress` 设为 `:6674`（若启用 HLS，再在配置里使用 **6673** 等与本文约定一致）。
 
 ---
 
@@ -298,14 +324,14 @@ focal_length_1x: 18.14756    # 1× 基准焦距（mm），32× 时自动 ×32
 
 ```
 ptz_launcher.py
-ptz_rtsp_stream.py
-ptz_rtsp_config.yaml
+ptz_stream.py
+ptz_config.yaml
 ptz_web_control.html
 mediamtx.yml
 mediamtx（二进制，或设 auto_download: true 自动下载）
 ```
 
-然后修改 `ptz_rtsp_config.yaml` 中：
+然后修改 `ptz_config.yaml` 中：
 1. `python_sh` → Isaac Sim 安装路径
 2. `scene_path` → 目标场景文件
 3. `camera_prim` → 目标场景中的相机 Prim 路径
@@ -359,7 +385,8 @@ python3 fix_ptz_orientation.py [--scene ./V3.0.usd] [--x 5.0] [--y -8.0] [--z 0.
 
 | 端口 | 进程 | 用途 |
 |------|------|------|
-| 8080 | ptz_launcher.py | Web UI + API（始终监听） |
-| 8081 | ptz_rtsp_stream.py | Isaac Sim 内部 API（按需） |
-| 8554 | mediamtx | RTSP 流（供 VLC/NVR）（按需） |
-| 8888 | mediamtx | HLS 流（按需） |
+| 6670 | ptz_launcher.py | Web UI + API（始终监听） |
+| 6671 | ptz_stream.py | Isaac Sim 内部 API（按需） |
+| 6672 | tls_tcp_proxy.py（可选） | HTTPS / WSS 代理至启动器 |
+| 6673 | mediamtx | HLS（可选；当前默认关闭） |
+| 6674 | mediamtx | RTSP 流（供 VLC/NVR）（按需） |
