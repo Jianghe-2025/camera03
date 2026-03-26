@@ -1,16 +1,18 @@
 ---
-description: git pull/合并冲突时按项目凭证文档决策保留哪一侧
+description: git merge/rebase 冲突时按项目凭证文档决策保留哪一侧（含 upstream 与 origin 区分）
 alwaysApply: true
 ---
 
 # Git 拉取与合并冲突
 
-当本仓库出现 **`git pull` / `merge` / `rebase` 冲突**，或用户要求处理与 **`origin/main`**（`git@github.com:asure1008/camera03.git`）不一致的改动时：
+远程约定：**`upstream`** = 原作者（`git@github.com:asure1008/camera03.git`），**`origin`** = 用户自己的 fork。与原作者对比用 **`upstream/main`**，不要再用 `origin` 指代原作者。
 
-1. **先读** **[docs/LOCAL_WORKTREE_OVERRIDES.md](docs/LOCAL_WORKTREE_OVERRIDES.md)**（本地工作区相对远程的修改凭证），再动手改冲突标记。
-2. **按文档 §2「按文件的本地意图」、§3「远程默认 vs 本机当前」** 决定各文件应保留的功能与配置；不要在未对照文档前整文件 `checkout --ours/--theirs`。
-3. **配置类**（`ptz_config.yaml`、`mediamtx.yml`）：文档约定本机为 **6670/6671/6674** 端口与 **`/home/uniubi/isaacsim/python.sh`**（或 `ISAAC_SIM_PYTHON`）；与文档冲突时以文档为准，除非用户明确要求对齐远程。
-4. **逻辑类**（`ptz_launcher.py`、`ptz_web_control.html` 等）：若远程新增与本机删除/简化冲突（如预置位持久化、`/presets*`），需**手工合并**或按用户指令二选一，并在回复中说明取舍与是否需更新 `LOCAL_WORKTREE_OVERRIDES.md`。
-5. 解决冲突后：提醒用户按文档 **§1** 用 `git diff origin/main` 复核；涉及运行环境时建议验证 Web 端口、RTSP、Isaac 启动。
+当本仓库出现 **`merge` / `rebase` 冲突**，或用户要求处理与 **`upstream/main`** 不一致的改动时：
 
-若 `LOCAL_WORKTREE_OVERRIDES.md` 与当前 `git diff origin/main` 明显脱节，应先更新该文档再按新内容处理冲突。
+1. **先读** **[docs/LOCAL_WORKTREE_OVERRIDES.md](docs/LOCAL_WORKTREE_OVERRIDES.md)**，再动手改冲突标记。若用户只说「拉取原作者代码」，优先按 **[.cursor/rules/sync-upstream.mdc](.cursor/rules/sync-upstream.mdc)** 执行 **`./scripts/sync_upstream.sh`**。
+2. **按文档 §2「按文件的本地意图」、§3「上游默认 vs 本 fork」** 决定各文件应保留的功能与配置；对未列入 `sync_upstream.sh` 的 `KEEP_OURS` 的文件，不要在未对照文档前随意整文件 `checkout --ours/--theirs`。
+3. **配置类**（`ptz_config.yaml`、`mediamtx.yml`）：文档约定本 fork 为 **6670/6671/6674** 端口与 **`/home/uniubi/isaacsim/python.sh`**（或 `ISAAC_SIM_PYTHON`）；与文档冲突时以文档为准，除非用户明确要求对齐上游。
+4. **逻辑类**（`ptz_launcher.py`、`ptz_stream.py`、`ptz_web_control.html` 等）：若上游新增与本 fork 删除/简化冲突（如预置位持久化、`/presets*`），需**手工合并**或按用户指令二选一，并在回复中说明取舍与是否需更新 `LOCAL_WORKTREE_OVERRIDES.md` 与 **`scripts/sync_upstream.sh` 中 `KEEP_OURS`**（若改了自动策略）。
+5. 解决冲突后：提醒用户按文档 **§1** 用 `git diff upstream/main` 复核；涉及运行环境时建议验证 Web 端口、RTSP、Isaac 启动。
+
+若 `LOCAL_WORKTREE_OVERRIDES.md` 与当前 `git diff upstream/main` 明显脱节，应先更新该文档再按新内容处理冲突。

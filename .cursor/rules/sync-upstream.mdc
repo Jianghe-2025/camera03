@@ -1,0 +1,16 @@
+---
+description: 用户要求拉取原作者代码、同步 upstream、合并 asure1008/camera03 时执行一键脚本与手工边界
+globs:
+alwaysApply: false
+---
+
+# 拉取原作者（upstream）代码
+
+当用户表达 **拉取原作者代码**、**同步 upstream**、**合并原作者仓库**、**从 asure1008 拉最新** 等意图时：
+
+1. **优先**在仓库根目录执行 **`./scripts/sync_upstream.sh`**（需已 `chmod +x`；工作区须干净）。脚本会 `fetch` + `merge upstream/main`，对约定路径冲突自动 **`checkout --ours`**，成功则 **`git push origin` 当前分支**。
+2. **不要**用 `git pull origin` 代替拉原作者；原作者远程名应为 **`upstream`**（`git@github.com:asure1008/camera03.git`），自己的 fork 为 **`origin`**。
+3. 若脚本因 **`ptz_launcher.py` / `ptz_stream.py`** 等退出：按 **[docs/LOCAL_WORKTREE_OVERRIDES.md](docs/LOCAL_WORKTREE_OVERRIDES.md)** 手工解决冲突后，提示用户 `git add`、`git commit`、`git push origin <分支>`。
+4. 若用户要求**改自动策略**：同时修改 **`scripts/sync_upstream.sh`** 中的 `KEEP_OURS` / 说明与 **`docs/LOCAL_WORKTREE_OVERRIDES.md` §6**，保持一致。
+
+可选：仅拉取不合并时可用 `SYNC_UPSTREAM_FETCH_ONLY=1 ./scripts/sync_upstream.sh`。

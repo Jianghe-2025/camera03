@@ -1,20 +1,28 @@
-# 本地工作区相对 `origin/main` 的修改凭证
+# 本地工作区相对原作者 `upstream/main` 的修改凭证
 
-> **用途**：与 GitHub 远程 `asure1008/camera03` 的 `main` 分支做 `git pull` / 合并出现冲突时，用本文判断「应保留本地行为」还是「采纳远程」。  
-> **生成基准**：已自 GitHub 同步至 **`origin/main` @ `224da6e`**；本机在之上另有提交 **`9d67c7d`**（按本文策略合并冲突后的工作区快照）。之后若有新 pull，请重新执行 §1 并更新本段哈希。
+> **用途**：与 GitHub 原作者仓库（远程名 **`upstream`**，如 `git@github.com:asure1008/camera03.git`）的 `main` 做 `fetch` / `merge` 出现冲突时，用本文判断「应保留本 fork 行为」还是「采纳上游」。你自己的 fork 应为远程 **`origin`**（如 `git@github.com:Jianghe-2025/camera03.git`）；**不要**再用 `origin` 指代原作者。  
+> **一键同步**：见 **§6** `scripts/sync_upstream.sh`（自动对 §6 所列文件在冲突时 `checkout --ours`，完成后推送到 `origin`）。  
+> **生成基准**：与 **`upstream/main`** 的差异请用 §1 命令随时刷新；若需记录快照哈希可写在本段。
 
 ---
 
 ## 1. 快速对照命令
 
-在仓库根目录执行，可随时刷新「与远程的差异」：
+在仓库根目录执行，可随时刷新「本 fork 相对原作者」的差异：
 
 ```bash
 cd /home/uniubi/Desktop/camera03-main
-git fetch origin
+git fetch upstream
 git status
+git diff upstream/main --stat
+git diff upstream/main > /tmp/camera03-vs-upstream.patch   # 完整差异备份
+```
+
+与**自己 GitHub fork**（`origin`）的差异：
+
+```bash
+git fetch origin
 git diff origin/main --stat
-git diff origin/main > /tmp/camera03-vs-origin.patch   # 完整差异备份
 ```
 
 冲突文件中若需**整文件**二选一（慎用，会丢掉另一边的全部改动）：
@@ -63,7 +71,7 @@ git checkout --ours -- path/to/file
 
 便于冲突时一眼决策（**本机**指当前工作区意图）：
 
-| 项 | 远程常见值（`origin/main`） | 本机当前意图 |
+| 项 | 上游常见值（`upstream/main`） | 本 fork 意图 |
 |----|-----------------------------|----------------|
 | Launcher HTTP | `8080` | **`6670`** |
 | Isaac 控制 HTTP | `8081` | **`6671`** |
@@ -76,11 +84,12 @@ git checkout --ours -- path/to/file
 
 ## 4. 与远程合并时的推荐策略
 
-1. **先备份**：`git diff origin/main > ~/camera03-local-$(date +%F).patch`  
-2. **先拉再合**：`git pull origin main`（有冲突则按文件处理）。  
-3. **配置类**（`ptz_config.yaml`、`mediamtx.yml`）：冲突时通常应**保留本机端口与 `python_sh`**，除非你有意改为与远程一致。  
-4. **逻辑类**（`ptz_launcher.py`、`ptz_web_control.html`）：若远程新增功能（例如预置位持久化），需**手工合并**两段逻辑，不能只选一侧。  
-5. 合并完成后在本机测：**`http://127.0.0.1:<launcher_port>/`**、**RTSP `6674`**、**Isaac 启动**。
+1. **先备份**：`git diff upstream/main > ~/camera03-local-$(date +%F).patch`  
+2. **推荐**：运行 **`./scripts/sync_upstream.sh`**（见 §6）；或手动 `git fetch upstream && git merge upstream/main`。  
+3. **配置类**（`ptz_config.yaml`、`mediamtx.yml`）：冲突时通常应**保留本 fork 端口与 `python_sh`**，除非你有意改为与上游一致（脚本对整文件冲突会默认 `--ours`）。  
+4. **逻辑类**（`ptz_launcher.py`、`ptz_stream.py` 等）：若上游新增功能与本 fork 简化冲突，需**手工合并**；脚本**不会**自动覆盖这两文件。  
+5. **逻辑类（网页）**（`ptz_web_control.html`）：脚本在整文件冲突时默认保留本 fork；若需同时保留上游大块新 UI，应手工合并。  
+6. 合并完成后在本机测：**`http://127.0.0.1:<launcher_port>/`**、**RTSP `6674`**、**Isaac 启动**。
 
 ---
 
@@ -90,7 +99,36 @@ git checkout --ours -- path/to/file
 |------|------|
 | 2026-03-25 | 首版：基于 `origin/main` @ `8a2ee37` 之上的工作区差异整理。 |
 | 2026-03-26 | 已 `pull` 同步至 `224da6e`；冲突按本文在 `ptz_launcher.py`（保留 tilt×90 + `_TILT_SCALE`）、`ptz_web_control.html`（`location.origin`）解决；`preview_enabled` 置 `true` 以保留网页预览。 |
+| 2026-03-26 | 约定 **`upstream`=原作者**、**`origin`=自己的 fork**；新增 §6 `scripts/sync_upstream.sh` 与 Cursor 规则「拉取原作者代码」流程。 |
 
 ---
 
-*本文档由本地维护；远程更新后请用第 1 节命令重新核对 `git diff origin/main`，必要时更新本节「生成基准」提交哈希。*
+## 6. 一键拉取原作者并推送本 fork（`scripts/sync_upstream.sh`）
+
+在仓库根目录执行：
+
+```bash
+./scripts/sync_upstream.sh
+```
+
+行为概要：
+
+1. `git fetch upstream`，再 `git merge upstream/main` 到**当前分支**（需工作区干净）。  
+2. 若发生冲突，对下列路径**整文件保留本 fork**（`git checkout --ours` + `git add`），与 §2 中「配置/文档/网页端口策略」一致：  
+   `ptz_config.yaml`、`mediamtx.yml`、`ptz_web_control.html`、`test_onvif.py`、`README.md`、`docs/API.md`、`.gitignore`  
+3. **`ptz_launcher.py`、`ptz_stream.py`** 若仍冲突：**不会**自动改，脚本退出并提示你按 §2 / §4 **手工合并**；完成后自行 `git add` + `git commit`，再 `git push origin <分支>`。  
+4. 若所有冲突已解决，脚本会 `git commit --no-edit` 并完成 **`git push origin <当前分支>`**。
+
+可选环境变量：
+
+| 变量 | 含义 |
+|------|------|
+| `SYNC_UPSTREAM_FETCH_ONLY=1` | 只 `fetch upstream`，不合并、不推送 |
+| `SYNC_UPSTREAM_NO_PUSH=1` | 合并并提交（若成功）但不 `push` |
+| `UPSTREAM_BRANCH=main` | 上游分支名（默认 `main`） |
+
+**限制**：脚本只做「列在 §6 的整文件保留本 fork」；**删除/重命名冲突**、`test_ws_flv.html` 等未列入路径仍可能需手工处理。调整策略时请同时改 **`scripts/sync_upstream.sh` 内数组** 与本文 §6，保持一致。
+
+---
+
+*本文档由本地维护；上游更新后请用 §1 命令重新核对 `git diff upstream/main`，必要时更新修订记录。*

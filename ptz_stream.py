@@ -561,7 +561,7 @@ def _start_mediamtx(mtx_path: str) -> subprocess.Popen:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
     )
-    time.sleep(2.0)  # 等待 mediamtx 启动并绑定端口
+    time.sleep(2.5)  # 等待 mediamtx 就绪后再让 ffmpeg 发布，减少首连 Broken pipe
     if proc.poll() is not None:
         err = proc.stderr.read().decode(errors="replace")
         raise RuntimeError(f"mediamtx 启动失败（exit {proc.returncode}）:\n{err}")
@@ -634,6 +634,7 @@ def _build_nvenc_cmd(rtsp_url: str, width: int, height: int, fps: int, bitrate: 
         "-delay", "0",
         "-b:v", bitrate,
         "-f", "rtsp",
+        "-rtsp_transport", "tcp",
         rtsp_url,
     ]
 
@@ -657,6 +658,7 @@ def _build_x264_cmd(rtsp_url: str, width: int, height: int, fps: int, bitrate: s
         "-b:v", bitrate,
         "-vf", vf,
         "-f", "rtsp",
+        "-rtsp_transport", "tcp",
         rtsp_url,
     ]
 
@@ -738,9 +740,41 @@ def _bind_camera(camera_prim_path: str, width: int, height: int):
 _running = True
 _ffmpeg_proc = None
 _mediamtx_proc = None
+_ffmpeg_restart_lock = threading.Lock()
+_ffmpeg_last_restart_mon = 0.0
 
 # 帧队列：主线程生产，写入线程消费。maxsize=2 保证实时性，满时丢旧帧。
 _frame_queue: queue.Queue = queue.Queue(maxsize=2)
+
+
+def _try_restart_ffmpeg() -> None:
+    """ffmpeg 退出后 mediamtx 上 ptz_cam 无发布者，ffplay 会 404；自动重启推流。"""
+    global _ffmpeg_proc, _ffmpeg_last_restart_mon
+    if not rtsp_enabled or _ffmpeg_proc is None:
+        return
+    dead = _ffmpeg_proc
+    if dead.poll() is None:
+        return
+    with _ffmpeg_restart_lock:
+        if _ffmpeg_proc is not dead or dead.poll() is None:
+            return
+        now = time.monotonic()
+        if now - _ffmpeg_last_restart_mon < 15.0:
+            return
+        _ffmpeg_last_restart_mon = now
+        print("[PTZ-RTSP] 检测到 ffmpeg 推流已退出，正在重启（RTSP 拉流若 404 多由此引起）…", flush=True)
+        try:
+            new_p = _start_ffmpeg(rtsp_url, W, H, fps, bitrate)
+            _ffmpeg_proc = new_p
+            threading.Thread(
+                target=_pipe_writer,
+                args=(new_p,),
+                daemon=True,
+                name="frame-writer",
+            ).start()
+            print(f"[PTZ-RTSP] ffmpeg 已重启（pid={new_p.pid}）", flush=True)
+        except Exception as exc:
+            print(f"[PTZ-RTSP] ffmpeg 重启失败：{exc}", flush=True)
 
 
 def _shutdown(signum=None, frame=None):
@@ -915,6 +949,8 @@ def main():
     drop_count       = 0     # 队列满导致的丢帧数
 
     while _running and sim_app.is_running():
+        _try_restart_ffmpeg()
+
         # 只在推流帧时渲染，其余帧跳过 GPU 渲染节省资源
         do_render = (frame_idx % skip_frames == 0)
 
