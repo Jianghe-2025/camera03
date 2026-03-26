@@ -84,10 +84,9 @@ bitrate         = cfg.get("bitrate", "4M")
 sim_hz          = cfg.get("sim_hz", 60)
 mediamtx_cfg    = cfg.get("mediamtx", {})
 rtsp_enabled    = cfg.get("rtsp_enabled",    True)
-mjpeg_quality   = cfg.get("mjpeg_quality",   80)
 FOCAL_LENGTH_1X = float(cfg.get("focal_length_1x", 18.14756))
 # 新增配置项
-preview_enabled = cfg.get("preview_enabled", True)   # false=关闭 MJPEG/ws-flv，仅 RTSP
+preview_enabled = cfg.get("preview_enabled", False)   # 已废弃：MJPEG/WS-FLV 已移除，VLC 直接拉 RTSP
 renderer_mode   = cfg.get("renderer", "RaytracedLighting")  # 可切换为更轻量模式
 _osd_cfg        = cfg.get("osd_time", {})
 osd_enabled     = _osd_cfg.get("enabled", False)
@@ -160,38 +159,29 @@ _scene_lock  = threading.Lock()
 _scene_dirty = threading.Event()
 _chosen_worker: int = 1   # 当 workers=1 时随机显示的工人编号（1 或 2）
 
-# ── MJPEG 帧缓冲（主循环写，HTTP handler 读）────────────────
-_mjpeg = {"jpeg": None, "frame_id": 0}
-_mjpeg_lock = threading.Lock()
-_jpeg_encode_fn = None   # 在 main() 里初始化
+# ── ONVIF 快照帧缓存（独立于 preview_enabled，ONVIF 快照是基础能力）────
+_snapshot_jpeg: bytes | None = None
+_snapshot_lock = threading.Lock()
 
 
-def _init_jpeg_encoder(quality: int):
-    """按优先级检测 JPEG 编码器：Pillow → OpenCV → 不可用。"""
+def _encode_jpeg(rgba) -> bytes | None:
+    """将 RGBA numpy 数组编码为 JPEG bytes，优先 PIL，回退 OpenCV。"""
     try:
-        from PIL import Image as _PILImg  # noqa
-        def _enc(rgba):
-            img = _PILImg.fromarray(rgba[:, :, :3])
-            buf = _io.BytesIO()
-            img.save(buf, "JPEG", quality=quality, optimize=False)
-            return buf.getvalue()
-        print("[PTZ-RTSP] MJPEG 编码器：Pillow ✓")
-        return _enc
-    except ImportError:
+        import io as _io
+        from PIL import Image as _PILImg
+        img = _PILImg.fromarray(rgba[:, :, :3])
+        buf = _io.BytesIO()
+        img.save(buf, "JPEG", quality=75)
+        return buf.getvalue()
+    except Exception:
         pass
     try:
-        import cv2 as _cv2  # noqa
-        _params = [_cv2.IMWRITE_JPEG_QUALITY, quality]
-        def _enc(rgba):
-            bgr = rgba[:, :, :3][:, :, ::-1].copy()
-            ok, buf = _cv2.imencode(".jpg", bgr, _params)
-            return buf.tobytes() if ok else None
-        print("[PTZ-RTSP] MJPEG 编码器：OpenCV ✓")
-        return _enc
-    except ImportError:
-        pass
-    print("[PTZ-RTSP] ⚠ 未找到 PIL/OpenCV，MJPEG 不可用（仅 RTSP）")
-    return None
+        import cv2 as _cv2
+        bgr = rgba[:, :, :3][:, :, ::-1].copy()
+        ok, buf = _cv2.imencode(".jpg", bgr, [_cv2.IMWRITE_JPEG_QUALITY, 75])
+        return buf.tobytes() if ok else None
+    except Exception:
+        return None
 
 
 def _apply_ptz_state(stage) -> None:
@@ -349,43 +339,15 @@ class _PTZHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        # MJPEG 连续流 —— 浏览器一次连接持续接收帧（低延迟）
-        if self.path.startswith("/stream.mjpeg"):
-            self.send_response(200)
-            self.send_header("Content-Type",
-                             "multipart/x-mixed-replace; boundary=ptzframe")
-            self.send_header("Cache-Control", "no-cache, no-store")
-            self.send_header("Connection",    "close")
-            self._cors()
-            self.end_headers()
-            last_fid = -1
-            try:
-                while _running:
-                    with _mjpeg_lock:
-                        fid = _mjpeg["frame_id"]
-                        jpg = _mjpeg["jpeg"]
-                    if fid == last_fid or jpg is None:
-                        time.sleep(0.015)   # ~67fps 上限轮询
-                        continue
-                    last_fid = fid
-                    self.wfile.write(
-                        b"--ptzframe\r\n"
-                        b"Content-Type: image/jpeg\r\n"
-                        b"Content-Length: " + str(len(jpg)).encode() + b"\r\n\r\n"
-                        + jpg + b"\r\n"
-                    )
-                    self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                pass
-            return
-
-        # 单帧快照（Safari 等不支持 MJPEG 流时的降级方案）
-        if self.path.startswith("/snapshot.jpg"):
-            with _mjpeg_lock:
-                jpg = _mjpeg["jpeg"]
+        if self.path == "/snapshot.jpg":
+            with _snapshot_lock:
+                jpg = _snapshot_jpeg
             if jpg is None:
                 self.send_response(503)
+                self.send_header("Content-Type", "text/plain")
+                self._cors()
                 self.end_headers()
+                self.wfile.write(b"snapshot not ready")
                 return
             self.send_response(200)
             self.send_header("Content-Type",   "image/jpeg")
@@ -786,25 +748,54 @@ def _pipe_writer(proc: subprocess.Popen) -> None:
     """
     后台写入线程：从 _frame_queue 取帧写入 ffmpeg stdin。
     与渲染主线程解耦，阻塞在 ffmpeg 消费速度上，不影响 Isaac 渲染循环。
-    None 哨兵表示退出。
+    None 哨兵表示退出；ffmpeg 意外退出时自动重启（最多等 3 秒/次，无限重试）。
     """
+    global _ffmpeg_proc
+
     t_write_total = 0.0
     write_count   = 0
     last_stat_t   = time.monotonic()
+    RESTART_DELAY = 3  # ffmpeg 崩溃后等待重启的秒数
 
-    while True:
-        frame = _frame_queue.get()
-        if frame is None:   # 哨兵，退出
-            break
+    while _running:
+        # ---- 检查 ffmpeg 是否还活着 ----
         if proc.poll() is not None:
+            rc = proc.returncode
+            print(f"[PTZ-RTSP] ffmpeg 已退出（returncode={rc}），{RESTART_DELAY}s 后自动重启...")
+            # 清空队列中的旧帧，避免重启后瞬间塞爆
+            while not _frame_queue.empty():
+                try:
+                    _frame_queue.get_nowait()
+                except queue.Empty:
+                    break
+            time.sleep(RESTART_DELAY)
+            if not _running:
+                break
+            proc = _start_ffmpeg(rtsp_url, W, H, fps, bitrate)
+            _ffmpeg_proc = proc
+            t_write_total = 0.0
+            write_count   = 0
+            last_stat_t   = time.monotonic()
+            print("[PTZ-RTSP] ffmpeg 已重启，恢复推流")
+            continue
+
+        # ---- 取帧并写入 ----
+        try:
+            frame = _frame_queue.get(timeout=1.0)
+        except queue.Empty:
+            continue  # 超时继续检查 _running 和 proc 状态
+
+        if frame is None:   # 哨兵，优雅退出
             break
+
         t0 = time.monotonic()
         try:
             proc.stdin.write(frame)
             proc.stdin.flush()
         except (BrokenPipeError, OSError):
-            print("[PTZ-RTSP] ffmpeg 管道已断开（写入线程退出）")
-            break
+            print("[PTZ-RTSP] ffmpeg 管道已断开，等待进程退出后重启...")
+            proc.wait()   # 让 poll() 下一轮检测到退出
+            continue
         t_write_total += time.monotonic() - t0
         write_count   += 1
 
@@ -826,15 +817,9 @@ def _pipe_writer(proc: subprocess.Popen) -> None:
 # ============================================================
 
 def main():
-    global _ffmpeg_proc, _mediamtx_proc, _jpeg_encode_fn
+    global _ffmpeg_proc, _mediamtx_proc
 
-    # --- 初始化 MJPEG JPEG 编码器（preview_enabled=false 时跳过）---
-    if preview_enabled:
-        _jpeg_encode_fn = _init_jpeg_encoder(mjpeg_quality)
-    else:
-        print("[PTZ-RTSP] preview_enabled=false，MJPEG 编码已禁用")
-
-    # --- 启动 PTZ 控制 HTTP API（含 MJPEG 端点）---
+    # --- 启动 PTZ 控制 HTTP API ---
     _start_control_server()
 
     # --- RTSP 管道（可选）---
@@ -849,8 +834,7 @@ def main():
         )
         _writer.start()
     else:
-        print(f"[PTZ-RTSP] RTSP 已禁用，仅 MJPEG 预览")
-        print(f"[PTZ-RTSP] 预览地址：http://localhost:{_CTRL_PORT}/stream.mjpeg")
+        print("[PTZ-RTSP] RTSP 已禁用")
 
     # --- 加载 USD 场景 ---
     print(f"[PTZ-RTSP] 加载场景：{scene_path}")
@@ -908,7 +892,6 @@ def main():
     # 主线程侧计数器
     t_step_total     = 0.0   # world.step() 累计耗时
     t_get_total      = 0.0   # annotator.get_data() 累计耗时
-    t_jpeg_total     = 0.0   # JPEG 编码累计耗时
     t_tobytes_total  = 0.0   # rgba.tobytes() 累计耗时
     render_count     = 0     # render=True 帧数
     capture_count    = 0     # 执行采集的帧数
@@ -951,17 +934,14 @@ def main():
                         np.resize(rgba, (H, W, rgba.shape[2] if rgba.ndim == 3 else 4))
                     )
 
-                # ① MJPEG 帧缓冲更新（仅 preview_enabled=true 时执行）
-                if preview_enabled and _jpeg_encode_fn is not None:
-                    t0 = time.monotonic()
-                    jpg = _jpeg_encode_fn(rgba)
-                    t_jpeg_total += time.monotonic() - t0
-                    if jpg:
-                        with _mjpeg_lock:
-                            _mjpeg["jpeg"]     = jpg
-                            _mjpeg["frame_id"] += 1
+                # ONVIF 快照帧缓存（独立于 preview_enabled，每帧更新）
+                jpg = _encode_jpeg(rgba)
+                if jpg:
+                    with _snapshot_lock:
+                        global _snapshot_jpeg
+                        _snapshot_jpeg = jpg
 
-                # ② RTSP 推流（可选，供 VLC / NVR 外部接入）
+                # RTSP 推流（供 VLC / NVR 外部接入）
                 # 丢旧保新：直接 tobytes()，省去 ascontiguousarray 的冗余拷贝
                 if rtsp_enabled and _ffmpeg_proc is not None \
                         and _ffmpeg_proc.poll() is None:
@@ -990,7 +970,6 @@ def main():
                 render_fps = render_count / elapsed
                 avg_step_ms    = (t_step_total  / render_count   * 1000) if render_count   else 0
                 avg_get_ms     = (t_get_total   / capture_count  * 1000) if capture_count  else 0
-                avg_jpeg_ms    = (t_jpeg_total  / capture_count  * 1000) if capture_count  else 0
                 avg_tobytes_ms = (t_tobytes_total / capture_count * 1000) if capture_count else 0
 
                 print(
@@ -998,13 +977,11 @@ def main():
                     f"step={avg_step_ms:.1f}ms  "
                     f"get_data={avg_get_ms:.1f}ms  "
                     f"tobytes={avg_tobytes_ms:.1f}ms  "
-                    f"jpeg={avg_jpeg_ms:.1f}ms  "
                     f"drop={drop_count}  sim_frame={frame_idx}"
                 )
                 # 重置计数器
                 t_step_total    = 0.0
                 t_get_total     = 0.0
-                t_jpeg_total    = 0.0
                 t_tobytes_total = 0.0
                 render_count    = 0
                 capture_count   = 0

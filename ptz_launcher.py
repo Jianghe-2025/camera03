@@ -31,7 +31,6 @@ PTZ 仿真 ONVIF 服务  ptz_launcher.py
 import argparse
 import base64
 import datetime
-import hashlib
 import io
 import json
 import os
@@ -361,51 +360,6 @@ def get_status() -> dict:
     return result
 
 
-# ══════════════════════════════════════════════════════════════════════
-# WebSocket 视频流
-# ══════════════════════════════════════════════════════════════════════
-
-# 帧缓存：后台线程写，WS handler 线程读
-_ws_cache      = {"jpeg": None, "frame_id": 0}
-_ws_cache_lock = threading.Lock()
-
-# 目标推流帧率（从 config 读取，默认 25）
-_WS_FPS = 25
-
-
-def _ws_frame_fetcher() -> None:
-    """后台线程：以 _WS_FPS 速率轮询 Isaac Sim 快照并缓存最新帧。"""
-    interval = 1.0 / max(1, _WS_FPS)
-    while True:
-        t0 = time.monotonic()
-        # 只要 Isaac Sim 端口可达就尝试拉帧（不依赖 _isaac_state 是否同步）
-        if _isaac_state == "running" or _port_in_use(ISAAC_PORT):
-            try:
-                with urllib.request.urlopen(
-                    f"http://localhost:{ISAAC_PORT}/snapshot.jpg", timeout=2
-                ) as r:
-                    data = r.read()
-                if data and len(data) > 1000:
-                    with _ws_cache_lock:
-                        _ws_cache["jpeg"]     = data
-                        _ws_cache["frame_id"] += 1
-            except Exception:
-                pass
-        elapsed = time.monotonic() - t0
-        time.sleep(max(0.0, interval - elapsed))
-
-
-def _ws_send(sock_file, data: bytes) -> None:
-    """向 WebSocket 客户端发送一帧 binary frame（RFC 6455，服务端无掩码）。"""
-    length = len(data)
-    if length <= 125:
-        header = bytes([0x82, length])
-    elif length <= 65535:
-        header = struct.pack("!BBH", 0x82, 126, length)
-    else:
-        header = struct.pack("!BBQ", 0x82, 127, length)
-    sock_file.write(header + data)
-    sock_file.flush()
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -713,10 +667,6 @@ def _wsd_listener() -> None:
         print(f"[PTZ-Launcher] ⚠ WS-Discovery 异常退出：{exc}")
 
 
-# ══════════════════════════════════════════════════════════════════════
-# WebSocket FLV+H.264 广播器
-# ══════════════════════════════════════════════════════════════════════
-
 def _port_in_use(port: int) -> bool:
     """检测 TCP 端口是否已被监听。"""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -724,140 +674,6 @@ def _port_in_use(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
-_flv_init_buf: bytes | None = None       # FLV 文件头 + metadata + AVC seq header
-_flv_init_ready = threading.Event()      # init_buf 就绪信号
-_flv_clients: dict = {}                  # cid → {sock_file, lock, state}
-_flv_clients_lock = threading.Lock()
-_flv_cid_counter = 0
-
-
-def _flv_tag_size(data: bytes, pos: int) -> int:
-    """返回 pos 处 FLV tag 的总字节数（含末尾 PreviousTagSize 4 字节），不足则返回 0。"""
-    if pos + 11 > len(data):
-        return 0
-    data_size = (data[pos + 1] << 16) | (data[pos + 2] << 8) | data[pos + 3]
-    total = 11 + data_size + 4
-    return total if pos + total <= len(data) else 0
-
-
-def _flv_is_keyframe(tag: bytes) -> bool:
-    """判断是否为 H.264 视频关键帧 tag（FrameType=1, CodecID=7）。"""
-    return len(tag) >= 12 and tag[0] == 0x09 and (tag[11] >> 4) == 1
-
-
-def _flv_is_avc_seqhdr(tag: bytes) -> bool:
-    """判断是否为 AVC Sequence Header（解码必须先收到此包）。"""
-    return (len(tag) >= 13 and tag[0] == 0x09
-            and tag[11] == 0x17 and tag[12] == 0x00)
-
-
-def _flv_broadcast(tag: bytes, is_kf: bool) -> None:
-    """将一个 FLV tag 广播给所有已连接客户端；新客户端等待首个关键帧后才开始接收。"""
-    dead = []
-    with _flv_clients_lock:
-        items = list(_flv_clients.items())
-    for cid, c in items:
-        if c["state"] == "waiting_kf":
-            if not is_kf:
-                continue
-            c["state"] = "live"
-        with c["lock"]:
-            try:
-                _ws_send(c["sock_file"], tag)
-            except Exception:
-                dead.append(cid)
-    if dead:
-        with _flv_clients_lock:
-            for cid in dead:
-                _flv_clients.pop(cid, None)
-
-
-def _flv_broadcaster() -> None:
-    """后台线程：Isaac Sim 运行时启动 ffmpeg 读 RTSP，解析 FLV tag 并广播给客户端。"""
-    global _flv_init_buf, _flv_cid_counter
-
-    FLV_FILE_HDR_LEN = 13   # 9 字节 FLV 文件头 + 4 字节 PreviousTagSize0
-
-    while True:
-        if _isaac_state != "running" or not _port_in_use(8554):
-            time.sleep(0.5)
-            continue
-
-        time.sleep(0.5)   # 等待 MediaMTX 稳定
-
-        cmd = [
-            "ffmpeg", "-loglevel", "quiet",
-            "-fflags", "nobuffer",
-            "-flags", "low_delay",
-            "-analyzeduration", "0",
-            "-probesize", "32",
-            "-rtsp_transport", "tcp",
-            "-i", "rtsp://localhost:8554/ptz_cam",
-            "-c:v", "copy",
-            "-an",
-            "-f", "flv", "pipe:1",
-        ]
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0
-        )
-
-        buf        = bytearray()
-        init_done  = False
-        local_init = bytearray()
-
-        try:
-            while True:
-                chunk = proc.stdout.read(65536)
-                if not chunk:
-                    break
-                buf.extend(chunk)
-
-                # 收集 FLV 文件头（固定 13 字节）
-                if not local_init and len(buf) >= FLV_FILE_HDR_LEN:
-                    if buf[:3] != b'FLV':
-                        break
-                    local_init.extend(buf[:FLV_FILE_HDR_LEN])
-                    buf = buf[FLV_FILE_HDR_LEN:]
-
-                if not local_init:
-                    continue
-
-                # 逐 tag 解析
-                pos = 0
-                while True:
-                    sz = _flv_tag_size(bytes(buf), pos)
-                    if sz == 0:
-                        break
-                    tag = bytes(buf[pos: pos + sz])
-                    pos += sz
-
-                    if not init_done:
-                        local_init.extend(tag)
-                        if _flv_is_avc_seqhdr(tag):
-                            # 收到 AVC 序列头，初始化包完整
-                            _flv_init_buf = bytes(local_init)
-                            _flv_init_ready.set()
-                            init_done = True
-                    else:
-                        _flv_broadcast(tag, _flv_is_keyframe(tag))
-
-                buf = buf[pos:]
-
-        except Exception:
-            pass
-        finally:
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except Exception:
-                pass
-
-        # 流中断：清空状态，断开所有客户端
-        _flv_init_ready.clear()
-        _flv_init_buf = None
-        with _flv_clients_lock:
-            _flv_clients.clear()
-        time.sleep(5)
 
 
 def _soap_wrap(body_content: str) -> bytes:
@@ -1667,16 +1483,6 @@ class _Handler(BaseHTTPRequestHandler):
             self._snap_handle()
             return
 
-        # WebSocket JPEG 帧流（轻量，浏览器自定义解码）
-        if path == "/ws":
-            self._ws_handle()
-            return
-
-        # WebSocket FLV+H.264 流（兼容 flv.js / jessibuca 等标准播放器）
-        if path == "/ws-flv":
-            self._ws_flv_handle()
-            return
-
         # 场景状态代理（Web UI 用）
         if path == "/scene/state":
             self._proxy_once(f"http://localhost:{ISAAC_PORT}/scene/state")
@@ -1727,6 +1533,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._onvif_handle("imaging")
             return
 
+        # 外部 ONVIF 设备 SOAP/快照代理端点（Web UI 外部设备模式使用）
+        if path == "/onvif-proxy":
+            self._onvif_proxy_handle()
+            return
+
         self.send_response(404); self.end_headers()
 
     def do_DELETE(self):
@@ -1740,6 +1551,121 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "token": parts[1], "items": _list_presets()})
                 return
         self.send_response(404); self.end_headers()
+
+    # ── ONVIF 代理（外部设备 SOAP/快照转发）────────────────────────────
+    def _onvif_proxy_handle(self) -> None:
+        """
+        POST /onvif-proxy
+        Body JSON:
+          {
+            "mode":     "soap" | "snapshot",
+            "url":      "http://target/onvif/...",
+            "soap":     "<SOAP XML>",          # mode=soap
+            "action":   "SOAPAction",           # mode=soap, optional
+            "username": "...",                  # optional
+            "password": "..."                   # optional
+          }
+        安全约束：
+          - 仅允许 http / https scheme
+          - 不允许转发到本机 127.0.0.1/localhost，避免 SSRF 反射攻击
+          - 超时 10s
+        """
+        import urllib.request as _urllib_req
+        import urllib.error  as _urllib_err
+
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            raw    = self.rfile.read(length)
+            req    = json.loads(raw)
+        except Exception as e:
+            self._json({"ok": False, "error": f"请求解析失败: {e}"}, 400)
+            return
+
+        mode = req.get("mode", "soap")
+        url  = req.get("url", "").strip()
+
+        # ── 安全校验 ────────────────────────────────────────────────
+        try:
+            parsed = urllib.parse.urlparse(url)
+        except Exception:
+            self._json({"ok": False, "error": "无效 URL"}, 400)
+            return
+
+        if parsed.scheme not in ("http", "https"):
+            self._json({"ok": False, "error": "仅支持 http/https"}, 400)
+            return
+
+        # 禁止 SSRF 到本机
+        blocked_hosts = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+        if parsed.hostname in blocked_hosts:
+            self._json({"ok": False, "error": "不允许代理到本机地址"}, 403)
+            return
+
+        username = req.get("username", "")
+        password = req.get("password", "")
+
+        headers = {}
+        if username:
+            import base64 as _b64
+            cred = _b64.b64encode(f"{username}:{password}".encode()).decode()
+            headers["Authorization"] = f"Basic {cred}"
+
+        try:
+            if mode == "soap":
+                soap_body = req.get("soap", "").encode()
+                action    = req.get("action", "")
+                headers["Content-Type"] = "application/soap+xml; charset=utf-8"
+                if action:
+                    headers["SOAPAction"] = action
+
+                http_req = _urllib_req.Request(url, data=soap_body, headers=headers, method="POST")
+                with _urllib_req.urlopen(http_req, timeout=10) as r:
+                    resp_data = r.read()
+                    resp_ct   = r.headers.get("Content-Type", "text/xml")
+
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type",   resp_ct)
+                    self.send_header("Content-Length", str(len(resp_data)))
+                    self._cors()
+                    self.end_headers()
+                    self.wfile.write(resp_data)
+                except Exception:
+                    pass
+
+            elif mode == "snapshot":
+                http_req = _urllib_req.Request(url, headers=headers, method="GET")
+                with _urllib_req.urlopen(http_req, timeout=10) as r:
+                    resp_data = r.read()
+                    resp_ct   = r.headers.get("Content-Type", "image/jpeg")
+
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type",   resp_ct)
+                    self.send_header("Content-Length", str(len(resp_data)))
+                    self.send_header("Cache-Control",  "no-cache, no-store")
+                    self._cors()
+                    self.end_headers()
+                    self.wfile.write(resp_data)
+                except Exception:
+                    pass
+
+            else:
+                self._json({"ok": False, "error": f"不支持的模式: {mode}"}, 400)
+
+        except _urllib_err.HTTPError as e:
+            err_body = e.read()
+            try:
+                self.send_response(e.code)
+                self.send_header("Content-Type",   "text/plain")
+                self.send_header("Content-Length", str(len(err_body)))
+                self._cors()
+                self.end_headers()
+                self.wfile.write(err_body)
+            except Exception:
+                pass
+        except Exception as e:
+            self._json({"ok": False, "error": f"代理请求失败: {e}"}, 502)
 
     # ── ONVIF 分发 ───────────────────────────────────────────────────
     def _onvif_handle(self, svc: str) -> None:
@@ -1843,43 +1769,34 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _snap_handle(self) -> None:
         """
-        返回最新 JPEG 快照：
-          1. 优先向 Isaac Sim 实时拉取（timeout=3s）
-          2. 失败时回退到 _ws_cache 里的最近缓存帧
-          3. 两者均无时返回 503
+        GET /onvif-snap.jpg —— ONVIF 标准快照端点（GetSnapshotUri 返回此 URL）。
+
+        实现：从 Isaac Sim 内部 HTTP（8081/snapshot.jpg）拉取最新渲染帧 JPEG。
+        回退：仿真未运行或拉取失败时返回 _OFFLINE_JPEG 离线占位图，确保永远 200。
         """
         jpeg = None
 
-        # ① 实时拉取
-        try:
-            with urllib.request.urlopen(
-                f"http://localhost:{ISAAC_PORT}/snapshot.jpg", timeout=3
-            ) as r:
-                data = r.read()
-            if data and len(data) > 1000:   # 非空且合理大小
-                jpeg = data
-        except Exception:
-            pass
-
-        # ② 回退缓存帧
-        if jpeg is None:
-            with _ws_cache_lock:
-                jpeg = _ws_cache.get("jpeg")
-
-        if jpeg is None:
-            # 回退到离线占位图，确保 ONVIF 客户端的 NVT 快照接口永远返回 200
-            # 而不是 503（503 会导致部分 VMS 判定设备不可用并隐藏直播模块）
-            jpeg = _OFFLINE_JPEG
-        if not jpeg:
+        # ── 从 ptz_stream 内部快照端点拉取实时帧 ────────────────────
+        if _port_in_use(ISAAC_PORT):
             try:
-                self.send_response(503)
-                self.send_header("Content-Type", "text/plain")
-                self._cors()
-                self.end_headers()
-                self.wfile.write(b"Isaac Sim not ready")
-            except Exception:
-                pass
-            return
+                with urllib.request.urlopen(
+                    f"http://localhost:{ISAAC_PORT}/snapshot.jpg", timeout=3
+                ) as r:
+                    data = r.read()
+                if data and len(data) > 100:
+                    jpeg = data
+                else:
+                    print(f"[PTZ-Snap] /snapshot.jpg 返回空数据（len={len(data) if data else 0}）")
+            except urllib.error.HTTPError as e:
+                print(f"[PTZ-Snap] /snapshot.jpg HTTP {e.code}：仿真帧尚未就绪")
+            except Exception as e:
+                print(f"[PTZ-Snap] /snapshot.jpg 拉取失败：{e}")
+        else:
+            print("[PTZ-Snap] Isaac Sim 未运行，返回离线占位图")
+
+        # ── 回退：离线占位图（确保 ONVIF 端点永远 200）──────────────
+        if jpeg is None:
+            jpeg = _OFFLINE_JPEG
 
         try:
             self.send_response(200)
@@ -1910,101 +1827,6 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-    # ── WebSocket 升级 & 推流 ────────────────────────────────────────
-    def _ws_handle(self) -> None:
-        """完成 WebSocket 握手，持续推送 JPEG 帧直到客户端断开。"""
-        ws_key = self.headers.get("Sec-WebSocket-Key", "")
-        if not ws_key:
-            self.send_response(400); self.end_headers()
-            return
-
-        # RFC 6455 握手
-        magic   = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-        accept  = base64.b64encode(
-            hashlib.sha1((ws_key + magic).encode()).digest()
-        ).decode()
-
-        self.send_response(101, "Switching Protocols")
-        self.send_header("Upgrade",              "websocket")
-        self.send_header("Connection",           "Upgrade")
-        self.send_header("Sec-WebSocket-Accept", accept)
-        self.end_headers()
-
-        last_fid = -1
-        sock_file = self.connection.makefile("wb", buffering=0)
-        try:
-            while True:
-                with _ws_cache_lock:
-                    fid  = _ws_cache["frame_id"]
-                    jpeg = _ws_cache["jpeg"]
-                if fid == last_fid or jpeg is None:
-                    time.sleep(0.015)
-                    continue
-                last_fid = fid
-                _ws_send(sock_file, jpeg)
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
-        finally:
-            try:
-                sock_file.close()
-            except Exception:
-                pass
-
-    # ── WebSocket FLV+H.264 推流 ─────────────────────────────────────
-    def _ws_flv_handle(self) -> None:
-        """完成 WebSocket 握手，向客户端推送 FLV+H.264 流（兼容 flv.js / jessibuca）。"""
-        global _flv_cid_counter
-
-        ws_key = self.headers.get("Sec-WebSocket-Key", "")
-        if not ws_key:
-            self.send_response(400); self.end_headers()
-            return
-
-        magic  = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-        accept = base64.b64encode(
-            hashlib.sha1((ws_key + magic).encode()).digest()
-        ).decode()
-
-        self.send_response(101, "Switching Protocols")
-        self.send_header("Upgrade",              "websocket")
-        self.send_header("Connection",           "Upgrade")
-        self.send_header("Sec-WebSocket-Accept", accept)
-        self.end_headers()
-
-        sock_file = self.connection.makefile("wb", buffering=0)
-        lock = threading.Lock()
-
-        # 等待 FLV 初始化包就绪（最多 20 秒）
-        if not _flv_init_ready.wait(timeout=20) or _flv_init_buf is None:
-            try: sock_file.close()
-            except Exception: pass
-            return
-
-        # 先发送初始化包（FLV 文件头 + metadata + AVC 序列头）
-        try:
-            _ws_send(sock_file, _flv_init_buf)
-        except Exception:
-            try: sock_file.close()
-            except Exception: pass
-            return
-
-        # 注册为活跃客户端，等下一个关键帧后开始接收实时数据
-        with _flv_clients_lock:
-            _flv_cid_counter += 1
-            cid = _flv_cid_counter
-            _flv_clients[cid] = {"sock_file": sock_file, "lock": lock, "state": "waiting_kf"}
-
-        try:
-            while True:
-                with _flv_clients_lock:
-                    if cid not in _flv_clients:
-                        break
-                time.sleep(1)
-        finally:
-            with _flv_clients_lock:
-                _flv_clients.pop(cid, None)
-            try: sock_file.close()
-            except Exception: pass
 
 
 # ── 主函数 ───────────────────────────────────────────────────────────
@@ -2024,21 +1846,9 @@ def _sync_isaac_state_on_startup() -> None:
 
 
 def main():
-    global _WS_FPS
-    _WS_FPS = cfg.get("fps", 25)
-
     # Launcher 重启后同步 Isaac Sim 实际运行状态
     _sync_isaac_state_on_startup()
 
-    # preview_enabled=false 时关闭预览线程，减少不必要的轮询与 GIL 竞争
-    _preview_enabled = cfg.get("preview_enabled", True)
-    if _preview_enabled:
-        # 启动 WebSocket JPEG 帧拉取后台线程
-        threading.Thread(target=_ws_frame_fetcher, daemon=True, name="ws-fetcher").start()
-        # 启动 WebSocket FLV+H.264 广播器线程
-        threading.Thread(target=_flv_broadcaster, daemon=True, name="flv-broadcaster").start()
-    else:
-        print("[PTZ-Launcher] preview_enabled=false，ws-fetcher 和 flv-broadcaster 已禁用")
     # 启动 WS-Discovery UDP 多播监听线程（局域网 ONVIF 自动发现）
     threading.Thread(target=_wsd_listener, daemon=True, name="wsd-discovery").start()
 
@@ -2048,8 +1858,7 @@ def main():
     print(f"[PTZ-Launcher] ONVIF 仿真服务运行中 → http://localhost:{LAUNCHER_PORT}/")
     print(f"[PTZ-Launcher] ONVIF 设备服务（局域网）：http://{lan_ip}:{LAUNCHER_PORT}/onvif/device_service")
     print(f"[PTZ-Launcher] ONVIF 快照端点：http://{lan_ip}:{LAUNCHER_PORT}/onvif-snap.jpg")
-    print(f"[PTZ-Launcher] RTSP 视频流：rtsp://{lan_ip}:{_RTSP_PORT}/ptz_cam  (VLC / NVR)")
-    print(f"[PTZ-Launcher] WS-FLV 流：ws://localhost:{LAUNCHER_PORT}/ws-flv  (flv.js / jessibuca)")
+    print(f"[PTZ-Launcher] RTSP 视频流（VLC 拉流）：rtsp://{lan_ip}:{_RTSP_PORT}/ptz_cam")
     print(f"[PTZ-Launcher] WS-Discovery：{_WSD_MCAST_ADDR}:{_WSD_PORT}（设备 UUID={_DEVICE_UUID}）")
     print(f"[PTZ-Launcher] Isaac Sim 内部端口：{ISAAC_PORT}（按需启动）")
     print(f"[PTZ-Launcher] 在 Web 界面点击 '启动仿真' 启动 Isaac Sim")

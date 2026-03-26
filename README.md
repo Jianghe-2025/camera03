@@ -2,7 +2,10 @@
 
 ## 工程概述
 
-本工程基于 **NVIDIA Isaac Sim** 实现了一套完整的 PTZ（Pan-Tilt-Zoom）虚拟安防相机系统，将 Isaac Sim 仿真场景的相机画面通过 **RTSP** 和 **MJPEG** 协议实时推流输出，并提供 Web 控制台实现相机角度、焦距及场景对象的实时调控。
+本工程基于 **NVIDIA Isaac Sim** 实现了一套完整的 PTZ（Pan-Tilt-Zoom）虚拟安防相机系统，将 Isaac Sim 仿真场景的相机画面通过 **RTSP** 协议实时推流输出，并提供 Web 控制台（ONVIF 标准协议）实现相机角度、焦距及场景对象的实时调控。
+
+> **视频预览**：Web UI 不再内嵌任何视频流。视频预览请使用 **VLC** 等播放器拉取 RTSP 流：
+> `rtsp://<host>:8554/ptz_cam`
 
 **第三方平台对接**（服务启停、拉流、PTZ 控制等完整 HTTP/RTSP 说明）见：**[docs/API.md](./docs/API.md)**。
 
@@ -13,20 +16,22 @@
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  用户浏览器  http://localhost:8080                       │
+│  PTZ控制 / ONVIF设置 / 场景控制（三列 Web UI）           │
 └──────────────────────┬──────────────────────────────────┘
                        │ HTTP
 ┌──────────────────────▼──────────────────────────────────┐
 │  ptz_launcher.py  :8080  (始终运行，GPU ≈ 0%)           │
 │  • 服务 Web UI                                          │
+│  • 内置 ONVIF SOAP 服务器（device/media/ptz）           │
 │  • 管理 Isaac Sim 子进程的启动 / 停止                    │
-│  • 代理 /control /scene/* /stream.mjpeg 到 :8081        │
+│  • 代理 /control /scene/* 到 :8081                      │
+│  • /onvif-proxy：外部 ONVIF 设备 SOAP/快照代理          │
 └──────────────────────┬──────────────────────────────────┘
                        │ 按需启动（start_new_session）
 ┌──────────────────────▼──────────────────────────────────┐
-│  ptz_rtsp_stream.py  :8081  (Isaac Sim headless)        │
+│  ptz_stream.py  :8081  (Isaac Sim headless)             │
 │  • 加载 V4.0.usd 场景                                   │
 │  • Replicator RenderProduct 捕获相机画面                 │
-│  • MJPEG 推流（浏览器低延迟预览）                        │
 │  • RTSP 推流（VLC / NVR 接入）                          │
 │  • PTZ 控制 API + 场景控制 API                          │
 └────────────┬────────────────────┬───────────────────────┘
@@ -125,50 +130,17 @@ ps -ef | grep -E 'ptz_stream.py|mediamtx' | grep -v grep
 tail -n 100 /home/uniubi/xuanyuan/Camera03/isaac_stream.log
 ```
 
-Isaac Sim 首次冷启动约需 **60~120 秒**，加载完成后 Web UI 自动切换为视频画面。
+Isaac Sim 首次冷启动约需 **60~120 秒**，加载完成后 Web UI 遮罩自动消失，可开始控制。
 
-### 2.1 为 `ws-flv` 启动 HTTPS / WSS 代理
+### 2.1 VLC 拉流预览
 
-当上层页面是 `https://` 时，浏览器通常不能直接连接 `ws://<host>:8080/ws-flv`。  
-可在服务器上额外启动一个 TLS 代理，将 `https://` / `wss://` 转发到本机 `8080`：
+Web UI 不再内嵌视频。Isaac Sim 运行后，使用 VLC 拉取 RTSP 流：
 
 ```bash
-cd /home/uniubi/xuanyuan/Camera03
-
-# 1) 生成自签名证书（仅首次需要）
-mkdir -p /home/uniubi/xuanyuan/Camera03/certs
-openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-  -keyout /home/uniubi/xuanyuan/Camera03/certs/camera03.key \
-  -out /home/uniubi/xuanyuan/Camera03/certs/camera03.crt \
-  -subj "/CN=192.168.61.171" \
-  -addext "subjectAltName=IP:192.168.61.171"
-
-# 2) 启动 HTTPS / WSS 代理（8443 -> 8080）
-nohup /home/uniubi/miniconda3/envs/env_isaaclab/bin/python3 \
-  /home/uniubi/xuanyuan/Camera03/tls_tcp_proxy.py \
-  --listen-host 0.0.0.0 \
-  --listen-port 8443 \
-  --upstream-host 127.0.0.1 \
-  --upstream-port 8080 \
-  --cert /home/uniubi/xuanyuan/Camera03/certs/camera03.crt \
-  --key /home/uniubi/xuanyuan/Camera03/certs/camera03.key \
-  > /tmp/camera03_tls_proxy.log 2>&1 &
-
-# 3) 检查端口与日志
-ss -ltnp | grep 8443
-tail -n 50 /tmp/camera03_tls_proxy.log
+vlc rtsp://<host>:8554/ptz_cam
+# 或
+ffplay rtsp://<host>:8554/ptz_cam -rtsp_transport tcp
 ```
-
-启动后可使用：
-
-```text
-https://192.168.61.171:8443/
-wss://192.168.61.171:8443/ws-flv
-```
-
-说明：
-- 自签名证书默认不会被浏览器信任，首次访问需要手动接受证书风险。
-- 当前用户无 `sudo`，因此默认使用 `8443`，不是 `443`。
 
 ### 3. 停止推流释放 GPU
 
@@ -188,16 +160,29 @@ ffplay rtsp://localhost:8554/ptz_cam -rtsp_transport tcp
 
 ## Web 控制台功能
 
-### PTZ 相机控制
+Web UI 三列卡片布局（响应式：>1200px 三列，768~1200px 两列，<768px 单列）。
+
+### 模块1：PTZ 控制
 
 | 控件 | 功能 | 范围 |
 |------|------|------|
 | 2D 摇杆 | 同时控制水平角（Pan）和俯仰角（Tilt） | Pan: -170°~+170°，Tilt: -90°~+30° |
 | 变焦滑条 | 光学变焦倍数 | 1× ~ 32× |
 | 预置位面板 | 调用 / 保存 / 删除 1~5 槽位 | 5 个固定槽位 |
+| RTSP 地址 | 只读展示，供复制到 VLC | `rtsp://<host>:8554/ptz_cam` |
 | 键盘 | ← → 调 Pan，↑ ↓ 调 Tilt，+/- 调 Zoom | — |
 
-### 场景控制（吊篮 + 工人）
+### 模块2：ONVIF 设置
+
+| 功能 | 说明 |
+|------|------|
+| 模式切换 | 当前服务（默认填充本机端点）/ 外部设备（手填 URL，走代理） |
+| 测试连接 | GetSystemDateAndTime → GetCapabilities → GetDeviceInformation → GetProfiles |
+| AbsoluteMove | 直接向 ptz_service 发送 ONVIF 标准 SOAP（−1~+1 归一化坐标） |
+| GoToHomePosition | ONVIF 标准归位命令 |
+| 快照抓图 | GetSnapshotUri → GET 图片 → 缩略图展示 + 下载 |
+
+### 模块3：场景控制（吊篮 + 工人）
 
 | 控件 | 功能 | 范围 |
 |------|------|------|
@@ -245,13 +230,6 @@ POST /scene/workers
 GET /scene/state
 ```
 
-### 视频流
-
-| 路径 | 说明 |
-|------|------|
-| `GET /stream.mjpeg` | MJPEG 连续流（浏览器 canvas 低延迟播放，延迟 ~100-300ms） |
-| `GET /snapshot.jpg` | 单帧 JPEG 快照 |
-
 ### ONVIF 服务（供 VMS / NVR 对接）
 
 | 方法 | 路径 | 说明 |
@@ -259,7 +237,8 @@ GET /scene/state
 | POST | `/onvif/device_service` | ONVIF 设备服务（GetCapabilities / GetSystemDateAndTime / GetServices） |
 | POST | `/onvif/media_service` | ONVIF 媒体服务（GetProfiles / GetSnapshotUri / GetServiceCapabilities） |
 | POST | `/onvif/ptz_service` | ONVIF PTZ 控制服务（AbsoluteMove / RelativeMove / SetPreset / GetPresets / GotoPreset / RemovePreset / GetStatus / GetNodes / GetConfigurations） |
-| GET | `/onvif-snap.jpg` | 单帧快照（ONVIF GetSnapshotUri 返回的 URL，代理到 Isaac Sim 内部快照） |
+| GET | `/onvif-snap.jpg` | 单帧快照（ONVIF GetSnapshotUri 返回的 URL，实时拉取 + 离线占位图兜底） |
+| POST | `/onvif-proxy` | 外部 ONVIF 设备 SOAP/快照代理（解决 CORS；不允许代理到 localhost） |
 | GET | `/presets` | 返回当前 1~5 预置位槽位 |
 | POST | `/presets/{token}` | 保存当前或指定 PTZ 到槽位 |
 | POST | `/presets/{token}/goto` | 调用槽位 |
@@ -355,7 +334,7 @@ python3 fix_ptz_orientation.py [--scene ./V3.0.usd] [--x 5.0] [--y -8.0] [--z 0.
 | omni.replicator.core | RenderProduct + RGB Annotator 图像捕获 |
 | MediaMTX | v1.17.0，RTSP Server |
 | ffmpeg | H.264 编码，yuv420p，零延迟推流 |
-| Pillow / OpenCV | MJPEG JPEG 帧编码 |
+| Pillow / OpenCV | （已移除 MJPEG 依赖；仅 RTSP 推流路径） |
 | Python 3.11 | Isaac Sim 内置 Python 环境 |
 
 ---
@@ -367,4 +346,4 @@ python3 fix_ptz_orientation.py [--scene ./V3.0.usd] [--x 5.0] [--y -8.0] [--z 0.
 | 8080 | ptz_launcher.py | Web UI + API（始终监听） |
 | 8081 | ptz_rtsp_stream.py | Isaac Sim 内部 API（按需） |
 | 8554 | mediamtx | RTSP 流（供 VLC/NVR）（按需） |
-| 8888 | mediamtx | HLS 流（按需） |
+| 8888 | mediamtx | HLS 流（mediamtx 内置，按需） |

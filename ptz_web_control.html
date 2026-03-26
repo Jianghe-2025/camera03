@@ -22,6 +22,8 @@
     --danger: #ff4466;
     --warn: #ffaa00;
     --glow: rgba(0,200,255,0.15);
+    --onvif: #a78bfa;
+    --onvif-glow: rgba(167,139,250,0.12);
   }
 
   body {
@@ -34,7 +36,7 @@
     overflow: hidden;
   }
 
-  /* ─── Header ───────────────────────────────────────────── */
+  /* ─── Header ─────────────────────────────────────────────── */
   header {
     flex-shrink: 0;
     background: var(--bg1);
@@ -45,6 +47,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 12px;
+    z-index: 10;
   }
 
   .logo {
@@ -70,6 +73,7 @@
     display: flex;
     gap: 8px;
     align-items: center;
+    flex-wrap: wrap;
   }
   .pill {
     font-size: 0.68rem;
@@ -85,8 +89,9 @@
   .pill.err     { border-color: var(--danger);  color: var(--danger);  }
   .pill.warn    { border-color: var(--warn);    color: var(--warn);    }
   .pill.neutral { border-color: var(--text3);   color: var(--text3);   }
+  .pill.rtsp    { border-color: var(--accent3); color: var(--accent3); font-family: 'Courier New', monospace; font-size: 0.62rem; cursor: default; }
 
-  /* ─── Power button ─────────────────────────────────────── */
+  /* ─── Power button ──────────────────────────────────────── */
   .power-btn {
     display: flex;
     align-items: center;
@@ -109,17 +114,17 @@
   .power-btn.stop:not(:disabled):hover  { background: rgba(255,68,102,.12); }
   .power-btn.loading { border-color: var(--warn); color: var(--warn); animation: pulse 1.2s infinite; }
 
-  /* ─── 未运行遮罩 ────────────────────────────────────────── */
+  /* ─── Isaac overlay (page-level) ───────────────────────── */
   #isaac-overlay {
-    position: absolute;
-    inset: 0;
+    position: fixed;
+    inset: 44px 0 0 0;
     background: rgba(8,13,22,.88);
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     gap: 16px;
-    z-index: 20;
+    z-index: 100;
     backdrop-filter: blur(4px);
   }
   #isaac-overlay .ovl-icon { font-size: 3.5rem; }
@@ -132,7 +137,7 @@
   #isaac-overlay .ovl-sub {
     font-size: 0.75rem;
     color: var(--text3);
-    max-width: 280px;
+    max-width: 340px;
     text-align: center;
     line-height: 1.6;
   }
@@ -156,106 +161,39 @@
     color: var(--text3);
     font-family: 'Courier New', monospace;
     margin-top: -8px;
+    max-width: 340px;
+    text-align: center;
   }
 
-  /* ─── Main layout ──────────────────────────────────────── */
+  /* ─── Main layout: 3-column ─────────────────────────────── */
   main {
     flex: 1;
-    display: flex;
+    display: grid;
+    grid-template-columns: 340px 1fr 280px;
     gap: 0;
     overflow: hidden;
   }
 
-  /* ─── Video panel ──────────────────────────────────────── */
-  .video-panel {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    background: #000;
-    position: relative;
-    overflow: hidden;
-  }
-
-  video {
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    display: block;
-  }
-
-  .video-hud {
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-  }
-  .hud-tl {
-    position: absolute;
-    top: 12px; left: 14px;
-    font-size: 0.7rem;
-    font-family: 'Courier New', monospace;
-    color: rgba(0,200,255,.8);
-    line-height: 1.6;
-  }
-  .hud-tr {
-    position: absolute;
-    top: 12px; right: 14px;
-    font-size: 0.7rem;
-    font-family: 'Courier New', monospace;
-    color: rgba(0,200,255,.6);
-    text-align: right;
-    line-height: 1.6;
-  }
-  .hud-bl {
-    position: absolute;
-    bottom: 0; left: 0; right: 0;
-    padding: 24px 14px 10px;
-    background: linear-gradient(transparent, rgba(0,0,0,.75));
-    font-size: 0.72rem;
-    font-family: 'Courier New', monospace;
-    color: var(--accent);
-    display: flex;
-    justify-content: space-between;
-  }
-  .rec { color: var(--danger); animation: pulse 1.2s infinite; margin-right: 6px; }
-
-  /* corner brackets */
-  .corner { position: absolute; width: 20px; height: 20px; }
-  .corner-tl { top: 8px; left: 8px; border-top: 2px solid var(--accent); border-left: 2px solid var(--accent); }
-  .corner-tr { top: 8px; right: 8px; border-top: 2px solid var(--accent); border-right: 2px solid var(--accent); }
-  .corner-bl { bottom: 8px; left: 8px; border-bottom: 2px solid var(--accent); border-left: 2px solid var(--accent); }
-  .corner-br { bottom: 8px; right: 8px; border-bottom: 2px solid var(--accent); border-right: 2px solid var(--accent); }
-
-  .video-placeholder {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 12px;
-    color: var(--text3);
-    font-size: 0.85rem;
-    pointer-events: none;
-  }
-  .placeholder-icon { font-size: 3rem; }
-
-  /* ─── Controls sidebar ─────────────────────────────────── */
-  .sidebar {
-    width: 320px;
-    flex-shrink: 0;
-    background: var(--bg1);
-    border-left: 1px solid var(--border);
+  .col {
     display: flex;
     flex-direction: column;
     overflow-y: auto;
     overflow-x: hidden;
+    border-right: 1px solid var(--border);
     scrollbar-width: thin;
     scrollbar-color: var(--border) transparent;
   }
+  .col:last-child { border-right: none; }
+  .col::-webkit-scrollbar { width: 4px; }
+  .col::-webkit-scrollbar-track { background: transparent; }
+  .col::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
+  /* ─── Card ──────────────────────────────────────────────── */
   .card {
     border-bottom: 1px solid var(--border);
     padding: 14px 16px;
+    background: var(--bg1);
+    flex-shrink: 0;
   }
   .card-title {
     font-size: 0.65rem;
@@ -274,8 +212,10 @@
     background: var(--accent);
     border-radius: 2px;
   }
+  .card-title.onvif-accent::before { background: var(--onvif); }
+  .card-title.scene-accent::before { background: var(--warn); }
 
-  /* ─── 2D Joystick ──────────────────────────────────────── */
+  /* ─── 2D Joystick ───────────────────────────────────────── */
   .joystick-wrap {
     display: flex;
     align-items: flex-start;
@@ -294,7 +234,6 @@
     overflow: hidden;
     touch-action: none;
   }
-  /* Grid lines */
   .joystick-area::before {
     content: '';
     position: absolute;
@@ -305,7 +244,6 @@
     background-size: 44px 44px;
     background-position: -1px -1px;
   }
-  /* Center crosshair */
   .joystick-area::after {
     content: '';
     position: absolute;
@@ -344,7 +282,6 @@
   .jl-w { position: absolute; left: 3px; top: 50%; transform: translateY(-50%); }
   .jl-e { position: absolute; right: 3px; top: 50%; transform: translateY(-50%); }
 
-  /* Right of joystick: values + nudge */
   .joystick-side {
     flex: 1;
     display: flex;
@@ -404,18 +341,14 @@
   }
   .reset-btn:hover { border-color: var(--accent2); color: var(--accent2); }
 
-  /* ─── Zoom slider ──────────────────────────────────────── */
+  /* ─── Zoom slider ───────────────────────────────────────── */
   .zoom-row {
     display: flex;
     align-items: center;
     gap: 10px;
     margin-bottom: 8px;
   }
-  .zoom-label {
-    font-size: 0.75rem;
-    color: var(--text);
-    white-space: nowrap;
-  }
+  .zoom-label { font-size: 0.75rem; color: var(--text); white-space: nowrap; }
   .zoom-val {
     font-family: 'Courier New', monospace;
     font-size: 1rem;
@@ -436,10 +369,6 @@
     cursor: pointer;
     border: 1px solid var(--border);
   }
-  input[type="range"]::-webkit-slider-runnable-track {
-    height: 4px;
-    border-radius: 2px;
-  }
   input[type="range"]::-webkit-slider-thumb {
     -webkit-appearance: none;
     width: 16px; height: 16px;
@@ -448,10 +377,6 @@
     cursor: pointer;
     margin-top: -6px;
     box-shadow: 0 0 6px rgba(0,200,255,.5);
-    transition: box-shadow .15s;
-  }
-  input[type="range"]::-webkit-slider-thumb:hover {
-    box-shadow: 0 0 14px rgba(0,200,255,.85);
   }
   input[type="range"]::-moz-range-thumb {
     width: 16px; height: 16px;
@@ -462,10 +387,7 @@
     box-shadow: 0 0 6px rgba(0,200,255,.5);
   }
 
-  .zoom-btns {
-    display: flex;
-    gap: 5px;
-  }
+  .zoom-btns { display: flex; gap: 5px; }
   .zbtn {
     flex: 1;
     background: var(--bg0);
@@ -480,12 +402,8 @@
   }
   .zbtn:hover { border-color: var(--accent); color: var(--accent); background: var(--glow); }
 
-  /* ─── Presets ──────────────────────────────────────────── */
-  .preset-grid {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 8px;
-  }
+  /* ─── Presets ───────────────────────────────────────────── */
+  .preset-grid { display: grid; grid-template-columns: 1fr; gap: 8px; }
   .preset-card {
     background: var(--bg0);
     border: 1px solid var(--border);
@@ -494,27 +412,10 @@
     display: grid;
     gap: 6px;
   }
-  .preset-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-  .preset-name {
-    font-size: 0.82rem;
-    color: var(--text);
-    font-weight: 600;
-  }
-  .preset-meta {
-    font-size: 0.66rem;
-    color: var(--text3);
-    font-family: 'Courier New', monospace;
-  }
-  .preset-actions {
-    display: grid;
-    grid-template-columns: 1.2fr .8fr .8fr;
-    gap: 5px;
-  }
+  .preset-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .preset-name { font-size: 0.82rem; color: var(--text); font-weight: 600; }
+  .preset-meta { font-size: 0.66rem; color: var(--text3); font-family: 'Courier New', monospace; }
+  .preset-actions { display: grid; grid-template-columns: 1.2fr .8fr .8fr; gap: 5px; }
   .pbtn {
     background: var(--bg0);
     border: 1px solid var(--border);
@@ -532,26 +433,18 @@
   .pbtn.goto { border-color: var(--accent2); color: var(--accent2); }
   .pbtn.save { border-color: var(--accent); color: var(--accent); }
   .pbtn.del  { border-color: #aa5566; color: #ff8ea1; }
+  .pbtn:disabled { opacity: .35; cursor: default; }
   .preset-empty { color: var(--text3); font-size: 0.68rem; }
 
-  /* ─── Info table ───────────────────────────────────────── */
-  .info-table {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 8px;
-  }
-  .info-cell { }
+  /* ─── Info table ────────────────────────────────────────── */
+  .info-table { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .info-key { font-size: 0.62rem; color: var(--text3); margin-bottom: 2px; letter-spacing: .04em; }
-  .info-val { font-family: 'Courier New', monospace; font-size: 0.78rem; color: var(--text); }
+  .info-val { font-family: 'Courier New', monospace; font-size: 0.78rem; color: var(--text); word-break: break-all; }
   .info-val.ac { color: var(--accent); }
+  .info-val.oc { color: var(--accent3); }
 
-  /* ─── Keyboard hint ────────────────────────────────────── */
-  .kbd-hint {
-    font-size: 0.62rem;
-    color: var(--text3);
-    line-height: 1.7;
-    padding-top: 4px;
-  }
+  /* ─── Keyboard hints ────────────────────────────────────── */
+  .kbd-hint { font-size: 0.62rem; color: var(--text3); line-height: 1.7; padding-top: 4px; }
   kbd {
     background: var(--bg2);
     border: 1px solid var(--border);
@@ -562,13 +455,192 @@
     color: var(--text2);
   }
 
-  /* scrollbar */
-  .sidebar::-webkit-scrollbar { width: 4px; }
-  .sidebar::-webkit-scrollbar-track { background: transparent; }
-  .sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  /* ─── ONVIF Settings Module ─────────────────────────────── */
+  .onvif-card { background: var(--bg1); border-color: rgba(167,139,250,.2); }
 
-  /* ─── 场景控制 ──────────────────────────────────────────── */
-  .scene-card { border-color: rgba(255,170,0,.25); }
+  .mode-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 14px;
+    background: var(--bg0);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px;
+  }
+  .mode-tab {
+    flex: 1;
+    padding: 5px;
+    border-radius: 4px;
+    border: none;
+    background: transparent;
+    color: var(--text3);
+    font-size: 0.68rem;
+    cursor: pointer;
+    transition: all .2s;
+    text-align: center;
+    letter-spacing: .04em;
+  }
+  .mode-tab.active { background: var(--bg2); color: var(--onvif); border: 1px solid rgba(167,139,250,.3); }
+
+  .form-row {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-bottom: 8px;
+  }
+  .form-label {
+    font-size: 0.62rem;
+    color: var(--text3);
+    letter-spacing: .04em;
+  }
+  .form-input {
+    background: var(--bg0);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    font-size: 0.75rem;
+    padding: 6px 8px;
+    width: 100%;
+    font-family: 'Courier New', monospace;
+    transition: border-color .2s;
+  }
+  .form-input:focus { outline: none; border-color: var(--onvif); }
+  .form-input::placeholder { color: var(--text3); }
+
+  .form-row-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .btn-primary {
+    width: 100%;
+    padding: 8px;
+    border-radius: 6px;
+    border: 1px solid var(--onvif);
+    background: var(--onvif-glow);
+    color: var(--onvif);
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all .2s;
+    letter-spacing: .04em;
+  }
+  .btn-primary:hover { background: rgba(167,139,250,.22); }
+  .btn-primary:disabled { opacity: .4; cursor: default; }
+  .btn-primary.accent2 { border-color: var(--accent2); color: var(--accent2); background: rgba(0,255,163,.06); }
+  .btn-primary.accent2:hover { background: rgba(0,255,163,.14); }
+  .btn-primary.warn { border-color: var(--warn); color: var(--warn); background: rgba(255,170,0,.06); }
+  .btn-primary.warn:hover { background: rgba(255,170,0,.14); }
+
+  .btn-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-top: 6px;
+  }
+
+  .device-info {
+    background: var(--bg0);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px;
+    margin-top: 8px;
+    display: none;
+  }
+  .device-info.visible { display: block; }
+  .device-info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .di-key { font-size: 0.6rem; color: var(--text3); margin-bottom: 1px; }
+  .di-val { font-family: 'Courier New', monospace; font-size: 0.72rem; color: var(--text); word-break: break-all; }
+  .di-val.ok { color: var(--accent2); }
+  .di-val.accent { color: var(--onvif); }
+
+  .onvif-log {
+    background: var(--bg0);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 8px;
+    margin-top: 8px;
+    font-family: 'Courier New', monospace;
+    font-size: 0.62rem;
+    color: var(--text3);
+    max-height: 80px;
+    overflow-y: auto;
+    line-height: 1.5;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .onvif-log .log-ok   { color: var(--accent2); }
+  .onvif-log .log-err  { color: var(--danger); }
+  .onvif-log .log-info { color: var(--accent); }
+  .onvif-log .log-warn { color: var(--warn); }
+
+  .ptz-inputs {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+  .ptz-input-wrap { display: flex; flex-direction: column; gap: 2px; }
+  .ptz-input-label { font-size: 0.6rem; color: var(--text3); }
+  .ptz-input {
+    background: var(--bg0);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--accent);
+    font-family: 'Courier New', monospace;
+    font-size: 0.8rem;
+    padding: 5px 6px;
+    width: 100%;
+    text-align: center;
+  }
+  .ptz-input:focus { outline: none; border-color: var(--onvif); }
+
+  /* ─── Snapshot preview ──────────────────────────────────── */
+  .snap-preview {
+    margin-top: 8px;
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .snap-preview.visible { display: flex; }
+  .snap-img-wrap {
+    position: relative;
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    overflow: hidden;
+    min-height: 90px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .snap-img {
+    max-width: 100%;
+    max-height: 160px;
+    object-fit: contain;
+    display: block;
+  }
+  .snap-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+  }
+  .snap-time { font-size: 0.6rem; color: var(--text3); font-family: 'Courier New', monospace; }
+  .snap-dl {
+    font-size: 0.62rem;
+    color: var(--accent);
+    text-decoration: none;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 8px;
+  }
+  .snap-dl:hover { border-color: var(--accent); background: var(--glow); }
+
+  /* ─── Scene Control ─────────────────────────────────────── */
+  .scene-card { border-color: rgba(255,170,0,.2); }
   .scene-row { display: flex; flex-direction: column; gap: 6px; }
   .scene-label {
     display: flex;
@@ -580,12 +652,7 @@
   }
   .scene-val { font-family: 'Courier New', monospace; color: var(--warn); font-weight: 600; }
   .scene-slider-wrap { position: relative; }
-  .scene-slider {
-    width: 100%;
-    height: 4px;
-    accent-color: var(--warn);
-    cursor: pointer;
-  }
+  .scene-slider { width: 100%; height: 4px; accent-color: var(--warn); cursor: pointer; }
   .scene-ticks {
     display: flex;
     justify-content: space-between;
@@ -594,12 +661,7 @@
     margin-top: 2px;
     padding: 0 1px;
   }
-  .scene-input-row {
-    display: flex;
-    gap: 5px;
-    align-items: center;
-    margin-top: 2px;
-  }
+  .scene-input-row { display: flex; gap: 5px; align-items: center; margin-top: 2px; }
   .scene-num {
     width: 70px;
     background: var(--bg0);
@@ -622,7 +684,6 @@
   }
   .scene-btn:hover { border-color: var(--warn); color: var(--warn); }
 
-  /* 工人数量按钮组 */
   .workers-btns { display: flex; gap: 5px; }
   .wbtn {
     flex: 1;
@@ -639,14 +700,33 @@
   .wbtn small { font-size: .6rem; display: block; color: var(--text3); }
   .wbtn:hover { border-color: var(--warn); color: var(--warn); }
   .wbtn.active { border-color: var(--warn); color: var(--warn); background: rgba(255,170,0,.08); }
-  .workers-hint {
-    font-size: 0.62rem;
-    color: var(--text3);
-    text-align: center;
-    min-height: 16px;
+  .workers-hint { font-size: 0.62rem; color: var(--text3); text-align: center; min-height: 16px; }
+
+  /* ─── Responsive ────────────────────────────────────────── */
+  @media (max-width: 1200px) {
+    main { grid-template-columns: 320px 1fr; }
+    .col-scene { order: 3; grid-column: span 1; border-top: 1px solid var(--border); }
+    main { grid-template-rows: auto auto; }
   }
+  @media (max-width: 768px) {
+    main { grid-template-columns: 1fr; overflow-y: auto; height: auto; }
+    body { overflow: auto; height: auto; min-height: 100vh; }
+    .col { max-height: none; overflow: visible; }
+  }
+
+  /* ─── Divider / section ─────────────────────────────────── */
+  .section-divider {
+    font-size: 0.6rem;
+    color: var(--text3);
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    padding: 6px 0 4px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 10px;
+  }
+  .mt8 { margin-top: 8px; }
+  .mt4 { margin-top: 4px; }
 </style>
-<script src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
 </head>
 <body>
 
@@ -659,55 +739,26 @@
   <div class="pills" style="flex:1;justify-content:flex-end;">
     <span class="pill neutral" id="p-isaac">Isaac ...</span>
     <span class="pill" id="p-api">API 连接中...</span>
-    <span class="pill" id="p-stream">视频 等待中...</span>
-    <span class="pill" id="p-fps">-- fps</span>
+    <span class="pill rtsp" id="p-rtsp" title="VLC 拉流地址">▶ rtsp://...</span>
     <button class="power-btn start" id="power-btn" onclick="toggleIsaac()">⏻ 启动仿真</button>
   </div>
 </header>
 
+<!-- Isaac overlay (page-level) -->
+<div id="isaac-overlay">
+  <div class="ovl-icon">🎬</div>
+  <div class="ovl-title">Isaac Sim 未运行</div>
+  <div class="ovl-sub">点击下方按钮启动 Isaac Sim 仿真服务，首次启动约需 60~120 秒加载场景。<br>视频预览请使用 VLC 拉取 RTSP 流。</div>
+  <button class="ovl-btn" id="ovl-start-btn" onclick="toggleIsaac()">⏻ 启动仿真</button>
+  <div class="ovl-log" id="ovl-log"></div>
+</div>
+
 <main>
-  <!-- Video -->
-  <div class="video-panel" id="video-panel">
-    <video id="stream-video" autoplay muted playsinline
-           style="width:100%;height:100%;display:block;background:#000;object-fit:contain;"></video>
 
-    <!-- Isaac Sim 未运行遮罩 -->
-    <div id="isaac-overlay">
-      <div class="ovl-icon">📷</div>
-      <div class="ovl-title">Isaac Sim 未运行</div>
-      <div class="ovl-sub">点击下方按钮启动 Isaac Sim 仿真服务，首次启动约需 60~120 秒加载场景。</div>
-      <button class="ovl-btn" id="ovl-start-btn" onclick="toggleIsaac()">⏻ 启动仿真</button>
-      <div class="ovl-log" id="ovl-log"></div>
-    </div>
-    <div class="video-hud">
-      <div class="corner corner-tl"></div>
-      <div class="corner corner-tr"></div>
-      <div class="corner corner-bl"></div>
-      <div class="corner corner-br"></div>
-      <div class="hud-tl">
-        <div><span class="rec">●</span>LIVE · CAM-01</div>
-        <div id="hud-ptz">PAN 0.0° | TILT -45.0° | ZOOM 1.0×</div>
-      </div>
-      <div class="hud-tr">
-        <div id="hud-time">--:--:--</div>
-        <div>1280 × 720</div>
-      </div>
-      <div class="hud-bl">
-        <span>ONVIF · :8080/onvif/device_service</span>
-        <span id="hud-fl">FL: 18.1mm</span>
-      </div>
-      <div class="video-placeholder" id="placeholder">
-        <div class="placeholder-icon">📷</div>
-        <div>正在连接视频流...</div>
-        <div style="font-size:.72rem;color:var(--text3)" id="placeholder-hint">WS-FLV · :8080/ws-flv</div>
-      </div>
-    </div>
-  </div>
+  <!-- ══════════════════ 模块1: PTZ 控制 ══════════════════ -->
+  <div class="col" id="col-ptz">
 
-  <!-- Sidebar -->
-  <div class="sidebar">
-
-    <!-- 2D Joystick -->
+    <!-- 云台方向控制 -->
     <div class="card">
       <div class="card-title">云台方向控制</div>
       <div class="joystick-wrap">
@@ -734,13 +785,13 @@
             <button class="nbtn" onclick="nudge('pan', 10)">Pan+10° ▶</button>
             <button class="nbtn" onclick="nudge('tilt',-10)">▲ Tilt-10°</button>
             <button class="nbtn" onclick="nudge('tilt', 10)">▼ Tilt+10°</button>
-            <button class="reset-btn" onclick="resetPT()">↺ 默认位 (Pan=-56, Tilt=9°)</button>
+            <button class="reset-btn" onclick="resetPT()">↺ 默认位 (Pan=-56°, Tilt=9°)</button>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- Zoom -->
+    <!-- 光学变焦 -->
     <div class="card">
       <div class="card-title">光学变焦</div>
       <div class="zoom-row">
@@ -758,31 +809,31 @@
       </div>
     </div>
 
-    <!-- Presets -->
+    <!-- 预置位 -->
     <div class="card">
       <div class="card-title">预置位（1~5）</div>
       <div class="preset-grid" id="preset-grid"></div>
     </div>
 
-    <!-- Stream info -->
+    <!-- RTSP 接入信息 -->
     <div class="card">
-      <div class="card-title">ONVIF 接入信息</div>
+      <div class="card-title">RTSP / ONVIF 接入信息</div>
       <div class="info-table">
         <div class="info-cell">
+          <div class="info-key">RTSP 流（VLC）</div>
+          <div class="info-val oc" id="info-rtsp">rtsp://...:8554/ptz_cam</div>
+        </div>
+        <div class="info-cell">
           <div class="info-key">设备服务</div>
-          <div class="info-val">:8080/onvif/device_service</div>
+          <div class="info-val ac" id="info-device-svc">:8080/onvif/device_service</div>
         </div>
         <div class="info-cell">
           <div class="info-key">快照地址</div>
-          <div class="info-val ac">:8080/onvif-snap.jpg</div>
+          <div class="info-val ac" id="info-snap">:8080/onvif-snap.jpg</div>
         </div>
         <div class="info-cell">
           <div class="info-key">PTZ 服务</div>
-          <div class="info-val ac">:8080/onvif/ptz_service</div>
-        </div>
-        <div class="info-cell">
-          <div class="info-key">分辨率</div>
-          <div class="info-val">1920 × 1080</div>
+          <div class="info-val ac" id="info-ptz-svc">:8080/onvif/ptz_service</div>
         </div>
         <div class="info-cell">
           <div class="info-key">焦距 (1×)</div>
@@ -795,7 +846,7 @@
       </div>
     </div>
 
-    <!-- Keyboard hints -->
+    <!-- 键盘快捷键 -->
     <div class="card">
       <div class="card-title">键盘快捷键</div>
       <div class="kbd-hint">
@@ -806,9 +857,148 @@
       </div>
     </div>
 
-    <!-- 场景控制 -->
+  </div><!-- /col-ptz -->
+
+
+  <!-- ══════════════════ 模块2: ONVIF 设置 ══════════════════ -->
+  <div class="col" id="col-onvif">
+
+    <!-- 连接配置 -->
+    <div class="card onvif-card">
+      <div class="card-title onvif-accent">ONVIF 连接配置</div>
+
+      <div class="mode-tabs">
+        <button class="mode-tab active" id="tab-local" onclick="switchMode('local')">当前服务</button>
+        <button class="mode-tab" id="tab-ext" onclick="switchMode('ext')">外部设备</button>
+      </div>
+
+      <div class="form-row">
+        <label class="form-label">Device Service URL</label>
+        <input class="form-input" id="input-device-svc" type="text" placeholder="http://host:8080/onvif/device_service">
+      </div>
+
+      <div id="svc-urls-section" style="display:none;">
+        <div class="form-row">
+          <label class="form-label">Media Service URL</label>
+          <input class="form-input" id="input-media-svc" type="text" placeholder="（测试连接后自动填充）">
+        </div>
+        <div class="form-row">
+          <label class="form-label">PTZ Service URL</label>
+          <input class="form-input" id="input-ptz-svc" type="text" placeholder="（测试连接后自动填充）">
+        </div>
+      </div>
+
+      <div class="form-row-2">
+        <div class="form-row" style="margin-bottom:0;">
+          <label class="form-label">用户名</label>
+          <input class="form-input" id="input-user" type="text" placeholder="（留空跳过认证）">
+        </div>
+        <div class="form-row" style="margin-bottom:0;">
+          <label class="form-label">密码</label>
+          <input class="form-input" id="input-pass" type="password" placeholder="">
+        </div>
+      </div>
+
+      <div class="mt8">
+        <button class="btn-primary" id="btn-connect" onclick="testConnection()">⚡ 测试连接</button>
+      </div>
+
+      <!-- 设备信息展示 -->
+      <div class="device-info" id="device-info">
+        <div class="device-info-grid">
+          <div>
+            <div class="di-key">厂商</div>
+            <div class="di-val" id="di-mfr">—</div>
+          </div>
+          <div>
+            <div class="di-key">型号</div>
+            <div class="di-val" id="di-model">—</div>
+          </div>
+          <div>
+            <div class="di-key">固件</div>
+            <div class="di-val" id="di-fw">—</div>
+          </div>
+          <div>
+            <div class="di-key">序列号</div>
+            <div class="di-val" id="di-sn">—</div>
+          </div>
+          <div>
+            <div class="di-key">ProfileToken</div>
+            <div class="di-val accent" id="di-token">—</div>
+          </div>
+          <div>
+            <div class="di-key">连接状态</div>
+            <div class="di-val ok" id="di-status">已连接</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 连接日志 -->
+      <div class="onvif-log" id="log-connect"></div>
+    </div>
+
+    <!-- ONVIF PTZ 控制 -->
+    <div class="card onvif-card">
+      <div class="card-title onvif-accent">ONVIF PTZ 控制</div>
+      <p style="font-size:.62rem;color:var(--text3);margin-bottom:10px;">
+        直接发送标准 ONVIF SOAP 命令（AbsoluteMove），坐标范围 −1.0 ~ +1.0。
+        成功后同步到左侧摇杆。
+      </p>
+
+      <div class="ptz-inputs">
+        <div class="ptz-input-wrap">
+          <span class="ptz-input-label">Pan（-1~+1）</span>
+          <input class="ptz-input" id="onvif-pan" type="number" min="-1" max="1" step="0.01" value="0">
+        </div>
+        <div class="ptz-input-wrap">
+          <span class="ptz-input-label">Tilt（-1~+1）</span>
+          <input class="ptz-input" id="onvif-tilt" type="number" min="-1" max="1" step="0.01" value="0">
+        </div>
+        <div class="ptz-input-wrap">
+          <span class="ptz-input-label">Zoom（0~1）</span>
+          <input class="ptz-input" id="onvif-zoom" type="number" min="0" max="1" step="0.01" value="0">
+        </div>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn-primary" onclick="onvifAbsoluteMove()">↗ AbsoluteMove</button>
+        <button class="btn-primary warn" onclick="onvifGoHome()">⌂ GoToHome</button>
+      </div>
+
+      <div class="onvif-log mt8" id="log-ptz"></div>
+    </div>
+
+    <!-- ONVIF 快照抓图 -->
+    <div class="card onvif-card">
+      <div class="card-title onvif-accent">ONVIF 快照抓图</div>
+      <p style="font-size:.62rem;color:var(--text3);margin-bottom:10px;">
+        通过 GetSnapshotUri 获取 ONVIF 标准快照地址，再拉取图片展示。
+      </p>
+
+      <button class="btn-primary accent2" id="btn-snap" onclick="onvifSnapshot()">📷 抓图</button>
+
+      <div class="snap-preview" id="snap-preview">
+        <div class="snap-img-wrap">
+          <img class="snap-img" id="snap-img" src="" alt="快照">
+        </div>
+        <div class="snap-meta">
+          <span class="snap-time" id="snap-time">—</span>
+          <a class="snap-dl" id="snap-dl" href="#" download="snapshot.jpg">⬇ 下载</a>
+        </div>
+        <div style="font-size:.6rem;color:var(--text3);word-break:break-all;" id="snap-url-display"></div>
+      </div>
+
+      <div class="onvif-log mt8" id="log-snap"></div>
+    </div>
+
+  </div><!-- /col-onvif -->
+
+
+  <!-- ══════════════════ 模块3: 场景控制 ══════════════════ -->
+  <div class="col col-scene" id="col-scene">
+
     <div class="card scene-card">
-      <div class="card-title">场景控制</div>
+      <div class="card-title scene-accent">场景控制</div>
 
       <!-- 吊篮高度 -->
       <div class="scene-row">
@@ -843,54 +1033,83 @@
         </div>
         <div class="workers-btns">
           <button class="wbtn" id="wbtn-0" onclick="setWorkers(0)">0 人</button>
-          <button class="wbtn active" id="wbtn-1" onclick="setWorkers(1)">1 人 <small>(随机)</small></button>
+          <button class="wbtn" id="wbtn-1" onclick="setWorkers(1)">1 人 <small>(随机)</small></button>
           <button class="wbtn active" id="wbtn-2" onclick="setWorkers(2)">2 人</button>
         </div>
         <div class="workers-hint" id="workers-hint">两人均显示，Y 跟随吊篮</div>
       </div>
     </div>
 
-  </div><!-- /sidebar -->
+  </div><!-- /col-scene -->
+
 </main>
 
 <script>
-// ── Config ────────────────────────────────────────────────
+// ── Config ────────────────────────────────────────────────────
 const HOST     = location.hostname || 'localhost';
-const API      = `http://${HOST}:8080`;   // 启动器地址（始终可用）
+const PORT     = location.port || '8080';
+const API      = `http://${HOST}:${PORT}`;
 const FOCAL_1X = 18.14756;
 
-// ── Isaac Sim 状态 ─────────────────────────────────────────
-// stopped | starting | running | stopping
+// ONVIF 默认端点（当前服务）
+const DEFAULT_DEVICE_SVC = `http://${HOST}:${PORT}/onvif/device_service`;
+const DEFAULT_MEDIA_SVC  = `http://${HOST}:${PORT}/onvif/media_service`;
+const DEFAULT_PTZ_SVC    = `http://${HOST}:${PORT}/onvif/ptz_service`;
+const RTSP_URL           = `rtsp://${HOST}:8554/ptz_cam`;
+
+// ── Isaac Sim 状态 ─────────────────────────────────────────────
 let isaacState = 'stopped';
 
-// ── PTZ State ─────────────────────────────────────────────
+// ── PTZ State ─────────────────────────────────────────────────
 const state = { pan: -56, tilt: 9, zoom: 1 };
 const LIMITS = { pan: [-170, 170], tilt: [-90, 30], zoom: [1, 32] };
 const presetStore = new Map();
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
-// ── DOM refs ──────────────────────────────────────────────
+// ── ONVIF 模块状态 ─────────────────────────────────────────────
+const onvif = {
+  mode: 'local',         // 'local' | 'ext'
+  deviceSvc: DEFAULT_DEVICE_SVC,
+  mediaSvc:  DEFAULT_MEDIA_SVC,
+  ptzSvc:    DEFAULT_PTZ_SVC,
+  profileToken: 'PTZProfile_1',
+  connected: false,
+};
+
+// ── 初始化 Header 信息 ─────────────────────────────────────────
+(function initHeader() {
+  document.getElementById('p-rtsp').textContent = `▶ ${RTSP_URL}`;
+  document.getElementById('p-rtsp').title = `VLC 拉流：${RTSP_URL}`;
+  document.getElementById('info-rtsp').textContent = RTSP_URL;
+  document.getElementById('info-device-svc').textContent = DEFAULT_DEVICE_SVC;
+  document.getElementById('info-snap').textContent = `http://${HOST}:${PORT}/onvif-snap.jpg`;
+  document.getElementById('info-ptz-svc').textContent = DEFAULT_PTZ_SVC;
+  document.getElementById('input-device-svc').value = DEFAULT_DEVICE_SVC;
+  document.getElementById('input-media-svc').value = DEFAULT_MEDIA_SVC;
+  document.getElementById('input-ptz-svc').value = DEFAULT_PTZ_SVC;
+})();
+
+// ── DOM refs ──────────────────────────────────────────────────
 const joystick   = document.getElementById('joystick');
 const jdot       = document.getElementById('jdot');
 const zoomSlider = document.getElementById('zoom-slider');
 
-// ── Joystick: pan + tilt 2D control ───────────────────────
-const JW = 176, JH = 176; // joystick pixel size
+// ── Joystick ──────────────────────────────────────────────────
+const JW = 176, JH = 176;
 
 function stateToPixel() {
-  const x = ((state.pan  - (-170)) / 340) * JW;
-  const y = ((state.tilt - (-90))  / 120) * JH;
-  return { x, y };
+  return {
+    x: ((state.pan  - (-170)) / 340) * JW,
+    y: ((state.tilt - (-90))  / 120) * JH,
+  };
 }
-
 function pixelToState(px, py) {
   return {
     pan:  clamp((px / JW) * 340 - 170, -170, 170),
     tilt: clamp((py / JH) * 120 - 90,  -90,   30),
   };
 }
-
 function updateDotPos() {
   const { x, y } = stateToPixel();
   jdot.style.left = x + 'px';
@@ -898,98 +1117,66 @@ function updateDotPos() {
 }
 
 let dragging = false;
-
 function getRelPos(e) {
   const rect = joystick.getBoundingClientRect();
   const cx = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
   const cy = (e.touches ? e.touches[0].clientY : e.clientY) - rect.top;
-  return {
-    px: clamp(cx, 0, JW),
-    py: clamp(cy, 0, JH),
-  };
+  return { px: clamp(cx, 0, JW), py: clamp(cy, 0, JH) };
 }
 
 joystick.addEventListener('mousedown', e => {
-  dragging = true;
-  joystick.classList.add('dragging');
+  dragging = true; joystick.classList.add('dragging');
   const { px, py } = getRelPos(e);
-  const s = pixelToState(px, py);
-  Object.assign(state, s);
-  updateAll();
-  scheduleApply();
+  Object.assign(state, pixelToState(px, py));
+  updateAll(); scheduleApply();
 });
 document.addEventListener('mousemove', e => {
   if (!dragging) return;
   const { px, py } = getRelPos(e);
-  const s = pixelToState(px, py);
-  Object.assign(state, s);
-  updateAll();
-  scheduleApply();
+  Object.assign(state, pixelToState(px, py));
+  updateAll(); scheduleApply();
 });
 document.addEventListener('mouseup', () => {
-  dragging = false;
-  joystick.classList.remove('dragging');
+  dragging = false; joystick.classList.remove('dragging');
 });
-
-// Touch
 joystick.addEventListener('touchstart', e => {
-  e.preventDefault();
-  dragging = true;
-  joystick.classList.add('dragging');
-  const { px, py } = getRelPos(e);
-  Object.assign(state, pixelToState(px, py));
+  e.preventDefault(); dragging = true; joystick.classList.add('dragging');
+  Object.assign(state, pixelToState(...Object.values(getRelPos(e))));
   updateAll(); scheduleApply();
 }, { passive: false });
 document.addEventListener('touchmove', e => {
-  if (!dragging) return;
-  e.preventDefault();
-  const { px, py } = getRelPos(e);
-  Object.assign(state, pixelToState(px, py));
+  if (!dragging) return; e.preventDefault();
+  Object.assign(state, pixelToState(...Object.values(getRelPos(e))));
   updateAll(); scheduleApply();
 }, { passive: false });
-document.addEventListener('touchend', () => {
-  dragging = false;
-  joystick.classList.remove('dragging');
-});
-
-// Double-click to reset pan/tilt
+document.addEventListener('touchend', () => { dragging = false; joystick.classList.remove('dragging'); });
 joystick.addEventListener('dblclick', () => resetPT());
 
-// ── Zoom slider ───────────────────────────────────────────
+// ── Zoom slider ───────────────────────────────────────────────
 zoomSlider.addEventListener('input', () => {
   state.zoom = parseFloat(zoomSlider.value);
-  updateAll();
-  scheduleApply();
+  updateAll(); scheduleApply();
 });
 
-// ── Display update ────────────────────────────────────────
+// ── Display update ────────────────────────────────────────────
 function updateAll() {
-  // Pan/Tilt readouts
   document.getElementById('pan-val').textContent  = state.pan.toFixed(1)  + '°';
   document.getElementById('tilt-val').textContent = state.tilt.toFixed(1) + '°';
-  // Zoom
   document.getElementById('zoom-val').textContent = state.zoom.toFixed(1) + '×';
   if (!dragging) zoomSlider.value = state.zoom;
-  // Joystick dot
   updateDotPos();
-  // HUD
-  const fl = (FOCAL_1X * state.zoom).toFixed(1);
-  document.getElementById('hud-ptz').textContent =
-    `PAN ${state.pan.toFixed(1)}° | TILT ${state.tilt.toFixed(1)}° | ZOOM ${state.zoom.toFixed(1)}×`;
-  document.getElementById('hud-fl').textContent = `FL: ${fl}mm`;
 }
 
-function presetLabel(token) {
-  return `预置位${token}`;
-}
+// ── Presets ───────────────────────────────────────────────────
+function presetLabel(token) { return `预置位${token}`; }
 
 function renderPresets() {
   const root = document.getElementById('preset-grid');
   root.innerHTML = '';
   for (let i = 1; i <= 5; i++) {
     const token = String(i);
-    const item = presetStore.get(token);
-    const card = document.createElement('div');
+    const item  = presetStore.get(token);
+    const card  = document.createElement('div');
     card.className = 'preset-card';
     card.innerHTML = `
       <div class="preset-head">
@@ -1004,8 +1191,7 @@ function renderPresets() {
         <button class="pbtn goto" ${item ? '' : 'disabled'} onclick="gotoPreset('${token}')">调用</button>
         <button class="pbtn save" onclick="savePreset('${token}')">保存</button>
         <button class="pbtn del" ${item ? '' : 'disabled'} onclick="deletePreset('${token}')">删除</button>
-      </div>
-    `;
+      </div>`;
     root.appendChild(card);
   }
 }
@@ -1017,9 +1203,7 @@ async function loadPresets() {
     const data = await r.json();
     presetStore.clear();
     for (const item of (data.items || [])) presetStore.set(String(item.token), item);
-  } catch (_) {
-    presetStore.clear();
-  }
+  } catch (_) { presetStore.clear(); }
   renderPresets();
 }
 
@@ -1036,10 +1220,7 @@ async function savePreset(token) {
     if (!r.ok) throw new Error(await r.text());
     await loadPresets();
     setApiStatus(true);
-  } catch (e) {
-    console.error('[Preset] save failed', e);
-    setApiStatus(false);
-  }
+  } catch (e) { setApiStatus(false); }
 }
 
 async function gotoPreset(token) {
@@ -1048,16 +1229,11 @@ async function gotoPreset(token) {
     if (!r.ok) throw new Error(await r.text());
     const data = await r.json();
     if (data.item) {
-      state.pan = data.item.pan;
-      state.tilt = data.item.tilt;
-      state.zoom = data.item.zoom;
+      state.pan = data.item.pan; state.tilt = data.item.tilt; state.zoom = data.item.zoom;
       updateAll();
     }
     setApiStatus(true);
-  } catch (e) {
-    console.error('[Preset] goto failed', e);
-    setApiStatus(false);
-  }
+  } catch (e) { setApiStatus(false); }
 }
 
 async function deletePreset(token) {
@@ -1067,15 +1243,11 @@ async function deletePreset(token) {
     if (!r.ok) throw new Error(await r.text());
     await loadPresets();
     setApiStatus(true);
-  } catch (e) {
-    console.error('[Preset] delete failed', e);
-    setApiStatus(false);
-  }
+  } catch (e) { setApiStatus(false); }
 }
 
-// ── API communication ─────────────────────────────────────
+// ── REST API communication ────────────────────────────────────
 let sendTimer = null;
-
 function scheduleApply() {
   clearTimeout(sendTimer);
   sendTimer = setTimeout(sendControl, 80);
@@ -1095,26 +1267,21 @@ async function sendControl() {
 
 function setApiStatus(ok) {
   const el = document.getElementById('p-api');
-  if (ok) { el.textContent = 'API ✓'; el.className = 'pill ok'; }
-  else     { el.textContent = 'API ✗'; el.className = 'pill err'; }
+  el.textContent = ok ? 'API ✓' : 'API ✗';
+  el.className   = 'pill ' + (ok ? 'ok' : 'err');
 }
 
-// ── Isaac Sim 启停 ─────────────────────────────────────────
+// ── Isaac Sim 启停 ─────────────────────────────────────────────
 async function toggleIsaac() {
   if (isaacState === 'stopped') {
-    _applyIsaacState('starting');   // 立即更新 UI，无需等待轮询
+    _applyIsaacState('starting');
     try {
       const r = await fetch(`${API}/start`, { method: 'POST' });
       if (!r.ok) throw new Error('HTTP ' + r.status);
-    } catch (e) {
-      console.error('[PTZ] 启动失败', e);
-      _applyIsaacState('stopped');  // 请求失败时回滚
-    }
+    } catch (e) { _applyIsaacState('stopped'); }
   } else if (isaacState === 'running') {
-    _applyIsaacState('stopping');   // 立即更新 UI
-    try {
-      await fetch(`${API}/stop`, { method: 'POST' });
-    } catch { /* 忽略，pollStatus 会同步真实状态 */ }
+    _applyIsaacState('stopping');
+    try { await fetch(`${API}/stop`, { method: 'POST' }); } catch { /* pollStatus 会同步 */ }
   }
 }
 
@@ -1127,47 +1294,29 @@ function _applyIsaacState(st) {
 
   switch (st) {
     case 'stopped':
-      btn.className   = 'power-btn start';
-      btn.textContent = '⏻ 启动仿真';
-      btn.disabled    = false;
-      ovl.style.display    = 'flex';
-      ovlBtn.disabled      = false;
-      ovlBtn.textContent   = '⏻ 启动仿真';
-      pill.textContent = 'Isaac 已停止';
-      pill.className   = 'pill neutral';
+      btn.className = 'power-btn start'; btn.textContent = '⏻ 启动仿真'; btn.disabled = false;
+      ovl.style.display = 'flex';
+      ovlBtn.disabled = false; ovlBtn.textContent = '⏻ 启动仿真';
+      pill.textContent = 'Isaac 已停止'; pill.className = 'pill neutral';
       setApiStatus(false);
       break;
     case 'starting':
-      btn.className   = 'power-btn loading';
-      btn.textContent = '⏳ 启动中...';
-      btn.disabled    = true;
-      ovl.style.display    = 'flex';
-      ovlBtn.disabled      = true;
-      ovlBtn.textContent   = '⏳ 加载中 (60~120s)...';
-      pill.textContent = 'Isaac 启动中';
-      pill.className   = 'pill warn';
-      // 轮询启动日志
+      btn.className = 'power-btn loading'; btn.textContent = '⏳ 启动中...'; btn.disabled = true;
+      ovl.style.display = 'flex';
+      ovlBtn.disabled = true; ovlBtn.textContent = '⏳ 加载中 (60~120s)...';
+      pill.textContent = 'Isaac 启动中'; pill.className = 'pill warn';
       _pollLog();
       break;
     case 'running':
-      btn.className   = 'power-btn stop';
-      btn.textContent = '⏹ 停止仿真';
-      btn.disabled    = false;
-      ovl.style.display    = 'none';
-      pill.textContent = 'Isaac 运行中';
-      pill.className   = 'pill ok';
-      // 同步场景状态（吊篮 + 工人）
+      btn.className = 'power-btn stop'; btn.textContent = '⏹ 停止仿真'; btn.disabled = false;
+      ovl.style.display = 'none';
+      pill.textContent = 'Isaac 运行中'; pill.className = 'pill ok';
       setTimeout(syncSceneState, 500);
       setTimeout(loadPresets, 200);
-      // 状态变为 running 时自动（重）连接视频流
-      if (_streamMode !== 'hls') setTimeout(startVideoStream, 500);
       break;
     case 'stopping':
-      btn.className   = 'power-btn loading';
-      btn.textContent = '⏳ 停止中...';
-      btn.disabled    = true;
-      pill.textContent = 'Isaac 停止中';
-      pill.className   = 'pill warn';
+      btn.className = 'power-btn loading'; btn.textContent = '⏳ 停止中...'; btn.disabled = true;
+      pill.textContent = 'Isaac 停止中'; pill.className = 'pill warn';
       break;
   }
 }
@@ -1179,7 +1328,7 @@ async function _pollLog() {
   try {
     const r = await fetch(`${API}/log`);
     if (r.ok) {
-      const txt  = await r.text();
+      const txt   = await r.text();
       const lines = txt.split('\n').filter(l => l.trim());
       const last  = lines.slice(-3).join(' | ');
       const el = document.getElementById('ovl-log');
@@ -1189,59 +1338,42 @@ async function _pollLog() {
   _logPollTimer = setTimeout(_pollLog, 3000);
 }
 
-// ── 状态轮询（含 Isaac Sim 运行状态）─────────────────────
+// ── 状态轮询 ───────────────────────────────────────────────────
 async function pollStatus() {
   try {
     const r = await fetch(`${API}/status`, { signal: AbortSignal.timeout(2000) });
     if (!r.ok) return;
     const s = await r.json();
-
-    // 更新 Isaac 状态
-    if (s.isaac_state && s.isaac_state !== isaacState) {
-      _applyIsaacState(s.isaac_state);
-    }
-
-    // 当 Isaac 运行且未拖动时，同步 PTZ 状态
+    if (s.isaac_state && s.isaac_state !== isaacState) _applyIsaacState(s.isaac_state);
     if (s.isaac_state === 'running' && s.ptz && !dragging) {
-      state.pan  = s.ptz.pan;
-      state.tilt = s.ptz.tilt;
-      state.zoom = s.ptz.zoom;
+      state.pan = s.ptz.pan; state.tilt = s.ptz.tilt; state.zoom = s.ptz.zoom;
       updateAll();
     }
-
     if (s.isaac_state === 'running') setApiStatus(true);
   } catch { /* ignore */ }
 }
 setInterval(pollStatus, 3000);
-loadPresets();
 
-// ── Utility controls ──────────────────────────────────────
+// ── Utility controls ──────────────────────────────────────────
 function nudge(axis, delta) {
   const [lo, hi] = LIMITS[axis];
   state[axis] = clamp(state[axis] + delta, lo, hi);
-  updateAll();
-  scheduleApply();
+  updateAll(); scheduleApply();
 }
-
 function setZoom(z) {
   state.zoom = clamp(z, 1, 32);
-  updateAll();
-  scheduleApply();
+  updateAll(); scheduleApply();
 }
-
 function resetPT() {
   state.pan = -56; state.tilt = 9;
-  updateAll();
-  sendControl();
+  updateAll(); sendControl();
 }
-
 function go(pan, tilt, zoom) {
   state.pan = pan; state.tilt = tilt; state.zoom = zoom;
-  updateAll();
-  sendControl();
+  updateAll(); sendControl();
 }
 
-// ── Keyboard shortcuts ────────────────────────────────────
+// ── Keyboard shortcuts ────────────────────────────────────────
 document.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT') return;
   const map = {
@@ -1257,164 +1389,7 @@ document.addEventListener('keydown', e => {
   if (map[e.key]) { e.preventDefault(); map[e.key](); }
 });
 
-// ── Clock ─────────────────────────────────────────────────
-function tick() {
-  const t = new Date();
-  document.getElementById('hud-time').textContent =
-    t.toLocaleTimeString('zh-CN', { hour12: false });
-}
-setInterval(tick, 1000); tick();
-
-// ── 视频流播放器（WS-FLV 优先，降级到快照轮询）──────────
-const video       = document.getElementById('stream-video');
-const placeholder = document.getElementById('placeholder');
-const WS_FLV_URL  = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws-flv`;
-const SNAP_URL    = `${location.protocol}//${location.host}/onvif-snap.jpg`;
-
-let _flvPlayer  = null;
-let _snapTimer  = null;
-let _streamMode = 'none';  // 'flv' | 'snap' | 'none'
-
-function setStreamStatus(ok, msg) {
-  const el = document.getElementById('p-stream');
-  el.textContent = '视频 ' + (msg || (ok ? '正常' : '断开'));
-  el.className = 'pill ' + (ok ? 'ok' : 'err');
-  placeholder.style.display = ok ? 'none' : 'flex';
-}
-
-function _destroyFlvPlayer() {
-  if (!_flvPlayer) return;
-  try {
-    _flvPlayer.pause();
-    _flvPlayer.unload();
-    _flvPlayer.detachMediaElement();
-    _flvPlayer.destroy();
-  } catch (_) {}
-  _flvPlayer = null;
-}
-
-// ── 快照轮询（WS-FLV 不可用时降级）───────────────────────
-let _snapCanvas = null;
-function _startSnapshotFallback() {
-  if (_streamMode === 'snap') return;
-  _destroyFlvPlayer();
-  _streamMode = 'snap';
-  document.getElementById('placeholder-hint').textContent = '快照轮询 · /onvif-snap.jpg';
-
-  if (!_snapCanvas) {
-    _snapCanvas = document.createElement('canvas');
-    const ctx = _snapCanvas.getContext('2d');
-    _snapCanvas.style.cssText = 'width:100%;height:100%;object-fit:contain;background:#000;position:absolute;top:0;left:0;';
-    video.parentNode.insertBefore(_snapCanvas, video);
-    video.style.display = 'none';
-
-    let _fpsFrames = 0, _fpsT0 = performance.now();
-    async function poll() {
-      if (_streamMode !== 'snap') return;
-      const t0 = performance.now();
-      try {
-        const res = await fetch(SNAP_URL + '?_t=' + Date.now());
-        if (!res.ok) throw new Error('snap ' + res.status);
-        const buf  = await res.arrayBuffer();
-        const blob = new Blob([buf], { type: 'image/jpeg' });
-        const url  = URL.createObjectURL(blob);
-        const img  = new Image();
-        img.onload = () => {
-          if (_snapCanvas.width !== img.width)   _snapCanvas.width  = img.width;
-          if (_snapCanvas.height !== img.height) _snapCanvas.height = img.height;
-          ctx.drawImage(img, 0, 0);
-          URL.revokeObjectURL(url);
-          _fpsFrames++;
-          const now = performance.now();
-          if (now - _fpsT0 >= 2000) {
-            document.getElementById('p-fps').textContent =
-              (_fpsFrames / ((now - _fpsT0) / 1000)).toFixed(1) + ' fps';
-            _fpsFrames = 0; _fpsT0 = now;
-          }
-        };
-        img.src = url;
-        setStreamStatus(true, '快照模式');
-      } catch {
-        setStreamStatus(false, '等待视频流...');
-      }
-      _snapTimer = setTimeout(poll, 300);
-    }
-    poll();
-  }
-}
-
-function _stopSnapshotFallback() {
-  _streamMode = 'none';
-  clearTimeout(_snapTimer);
-  if (_snapCanvas) {
-    _snapCanvas.style.display = 'none';
-    _snapCanvas = null;
-  }
-  video.style.display = 'block';
-  document.getElementById('placeholder-hint').textContent = `WS-FLV · ${WS_FLV_URL}`;
-}
-
-// ── 主入口：WS-FLV 播放（flv.js），失败降级快照 ───────────
-function startVideoStream() {
-  if (_streamMode === 'flv') return;
-  _stopSnapshotFallback();
-
-  if (!window.flvjs || !flvjs.isSupported()) {
-    _startSnapshotFallback();
-    return;
-  }
-
-  _destroyFlvPlayer();
-
-  let connected = false;
-  const timeout = setTimeout(() => {
-    if (!connected) {
-      _destroyFlvPlayer();
-      _startSnapshotFallback();
-    }
-  }, 8000);
-
-  _flvPlayer = flvjs.createPlayer({
-    type: 'flv',
-    isLive: true,
-    hasAudio: false,
-    url: WS_FLV_URL
-  }, {
-    enableWorker: false,
-    lazyLoad: false,
-    stashInitialSize: 64,
-    autoCleanupSourceBuffer: true
-  });
-
-  _flvPlayer.attachMediaElement(video);
-  _flvPlayer.load();
-  _flvPlayer.play().catch(() => {});
-
-  _flvPlayer.on(flvjs.Events.MEDIA_INFO, (info) => {
-    connected = true;
-    clearTimeout(timeout);
-    _streamMode = 'flv';
-    setStreamStatus(true, 'WS-FLV 已连接');
-    document.getElementById('placeholder-hint').textContent = `WS-FLV · ${WS_FLV_URL}`;
-    if (info && info.width && info.height) {
-      document.getElementById('p-fps').textContent = '15 fps';
-    }
-  });
-
-  _flvPlayer.on(flvjs.Events.ERROR, (type, detail) => {
-    clearTimeout(timeout);
-    _destroyFlvPlayer();
-    if (!connected) {
-      _startSnapshotFallback();
-      return;
-    }
-    setStreamStatus(false, `WS-FLV 重连中...`);
-    _streamMode = 'none';
-    setTimeout(startVideoStream, 1000);
-  });
-}
-
-// ── 场景控制 ──────────────────────────────────────────────
+// ── 场景控制 ───────────────────────────────────────────────────
 const sceneState = { gondola_y: 0, workers: 2 };
 
 function onGondolaInput(v) {
@@ -1424,7 +1399,6 @@ function onGondolaInput(v) {
   document.getElementById('gondola-num').value = y.toFixed(0);
   scheduleGondola();
 }
-
 function setGondola(y) {
   y = Math.max(0, Math.min(3300, y));
   sceneState.gondola_y = y;
@@ -1439,7 +1413,6 @@ function scheduleGondola() {
   clearTimeout(_gondolaTimer);
   _gondolaTimer = setTimeout(sendGondola, 80);
 }
-
 async function sendGondola() {
   if (isaacState !== 'running') return;
   try {
@@ -1456,17 +1429,13 @@ const WORKER_HINTS = [
   '随机显示 1 名工人，Y 跟随吊篮',
   '两人均显示，Y 跟随吊篮',
 ];
-
 function setWorkers(n) {
   sceneState.workers = n;
   document.getElementById('workers-val').textContent = n + ' 人';
   document.getElementById('workers-hint').textContent = WORKER_HINTS[n];
-  [0, 1, 2].forEach(i => {
-    document.getElementById(`wbtn-${i}`).classList.toggle('active', i === n);
-  });
+  [0, 1, 2].forEach(i => document.getElementById(`wbtn-${i}`).classList.toggle('active', i === n));
   sendWorkers();
 }
-
 async function sendWorkers() {
   if (isaacState !== 'running') return;
   try {
@@ -1477,7 +1446,6 @@ async function sendWorkers() {
     });
   } catch { /* ignore */ }
 }
-
 async function syncSceneState() {
   if (isaacState !== 'running') return;
   try {
@@ -1494,11 +1462,342 @@ async function syncSceneState() {
   } catch { /* ignore */ }
 }
 
-// ── Init ──────────────────────────────────────────────────
-// 初始化工人按钮状态
+
+// ══════════════════════════════════════════════════════════════
+// ONVIF 模块
+// ══════════════════════════════════════════════════════════════
+
+// ── 日志工具 ───────────────────────────────────────────────────
+function appendLog(elId, msg, cls = '') {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  const line = document.createElement('div');
+  if (cls) line.className = 'log-' + cls;
+  line.textContent = `[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] ${msg}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+  // 最多保留 30 条
+  while (el.children.length > 30) el.removeChild(el.firstChild);
+}
+
+// ── 模式切换 ───────────────────────────────────────────────────
+function switchMode(mode) {
+  onvif.mode = mode;
+  document.getElementById('tab-local').classList.toggle('active', mode === 'local');
+  document.getElementById('tab-ext').classList.toggle('active', mode === 'ext');
+  const extSection = document.getElementById('svc-urls-section');
+  extSection.style.display = mode === 'ext' ? 'block' : 'none';
+
+  if (mode === 'local') {
+    document.getElementById('input-device-svc').value = DEFAULT_DEVICE_SVC;
+    document.getElementById('input-media-svc').value  = DEFAULT_MEDIA_SVC;
+    document.getElementById('input-ptz-svc').value    = DEFAULT_PTZ_SVC;
+    onvif.deviceSvc = DEFAULT_DEVICE_SVC;
+    onvif.mediaSvc  = DEFAULT_MEDIA_SVC;
+    onvif.ptzSvc    = DEFAULT_PTZ_SVC;
+  }
+}
+
+// ── SOAP Builder ──────────────────────────────────────────────
+function buildSoap(bodyXml, ns = {}) {
+  const nsStr = Object.entries({
+    's':    'http://www.w3.org/2003/05/soap-envelope',
+    'tds':  'http://www.onvif.org/ver10/device/wsdl',
+    'trt':  'http://www.onvif.org/ver10/media/wsdl',
+    'tptz': 'http://www.onvif.org/ver20/ptz/wsdl',
+    'tt':   'http://www.onvif.org/ver10/schema',
+    ...ns,
+  }).map(([k, v]) => `xmlns:${k}="${v}"`).join(' ');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope ${nsStr}>
+  <s:Body>
+    ${bodyXml}
+  </s:Body>
+</s:Envelope>`;
+}
+
+// ── 代理判断（本机服务直连；外部设备走 /onvif-proxy）────────────
+function isSameOrigin(url) {
+  try {
+    const u = new URL(url);
+    return u.hostname === HOST;
+  } catch { return false; }
+}
+
+async function soapRequest(url, soapXml, action = '') {
+  if (onvif.mode === 'ext' && !isSameOrigin(url)) {
+    // 外部设备：通过代理转发
+    const r = await fetch(`${API}/onvif-proxy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode:     'soap',
+        url,
+        soap:     soapXml,
+        action,
+        username: document.getElementById('input-user').value,
+        password: document.getElementById('input-pass').value,
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!r.ok) throw new Error(`代理错误 ${r.status}: ${await r.text()}`);
+    return await r.text();
+  } else {
+    // 本机服务：直接发 SOAP
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/soap+xml; charset=utf-8',
+        ...(action ? { 'SOAPAction': action } : {}),
+      },
+      body: soapXml,
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.text();
+  }
+}
+
+// XML 解析工具
+function parseXml(text) {
+  return new DOMParser().parseFromString(text, 'text/xml');
+}
+function xmlText(doc, ...tags) {
+  for (const tag of tags) {
+    const el = doc.querySelector(tag) || [...doc.getElementsByTagNameNS('*', tag)][0];
+    if (el) return el.textContent.trim();
+  }
+  return '';
+}
+
+// ── 连接测试 ───────────────────────────────────────────────────
+async function testConnection() {
+  const btn = document.getElementById('btn-connect');
+  btn.disabled = true;
+  btn.textContent = '连接中...';
+
+  const deviceSvc = document.getElementById('input-device-svc').value.trim() || DEFAULT_DEVICE_SVC;
+  onvif.deviceSvc = deviceSvc;
+
+  document.getElementById('log-connect').innerHTML = '';
+  document.getElementById('device-info').classList.remove('visible');
+
+  try {
+    // Step 1: GetSystemDateAndTime
+    appendLog('log-connect', 'GetSystemDateAndTime...', 'info');
+    const dtSoap = buildSoap('<tds:GetSystemDateAndTime/>');
+    await soapRequest(deviceSvc, dtSoap);
+    appendLog('log-connect', '时钟获取成功', 'ok');
+
+    // Step 2: GetCapabilities
+    appendLog('log-connect', 'GetCapabilities...', 'info');
+    const capSoap = buildSoap('<tds:GetCapabilities><tds:Category>All</tds:Category></tds:GetCapabilities>');
+    const capXml  = await soapRequest(deviceSvc, capSoap);
+    const capDoc  = parseXml(capXml);
+
+    // 自动解析服务地址
+    const mediaXAddr = xmlText(capDoc, 'Media') ? '' : '';
+    const allXAddrs = [...capDoc.getElementsByTagNameNS('*', 'XAddr')].map(e => e.textContent.trim());
+    let mediaSvcUrl = DEFAULT_MEDIA_SVC;
+    let ptzSvcUrl   = DEFAULT_PTZ_SVC;
+
+    // 根据 Capabilities 中的节点类型推断地址
+    const caps = capDoc.querySelector('Capabilities') || capDoc.querySelector('GetCapabilitiesResponse');
+    if (caps) {
+      const mediaNode = [...caps.getElementsByTagNameNS('*', 'Media')][0];
+      const ptzNode   = [...caps.getElementsByTagNameNS('*', 'PTZ')][0];
+      if (mediaNode) {
+        const xa = [...mediaNode.getElementsByTagNameNS('*', 'XAddr')][0];
+        if (xa && xa.textContent.trim()) mediaSvcUrl = xa.textContent.trim();
+      }
+      if (ptzNode) {
+        const xa = [...ptzNode.getElementsByTagNameNS('*', 'XAddr')][0];
+        if (xa && xa.textContent.trim()) ptzSvcUrl = xa.textContent.trim();
+      }
+    }
+
+    onvif.mediaSvc = mediaSvcUrl;
+    onvif.ptzSvc   = ptzSvcUrl;
+    document.getElementById('input-media-svc').value = mediaSvcUrl;
+    document.getElementById('input-ptz-svc').value   = ptzSvcUrl;
+    appendLog('log-connect', `Media: ${mediaSvcUrl.split('/').pop()}`, 'ok');
+    appendLog('log-connect', `PTZ:   ${ptzSvcUrl.split('/').pop()}`, 'ok');
+
+    // Step 3: GetDeviceInformation
+    appendLog('log-connect', 'GetDeviceInformation...', 'info');
+    const diSoap = buildSoap('<tds:GetDeviceInformation/>');
+    const diXml  = await soapRequest(deviceSvc, diSoap);
+    const diDoc  = parseXml(diXml);
+    document.getElementById('di-mfr').textContent   = xmlText(diDoc, 'Manufacturer')   || '—';
+    document.getElementById('di-model').textContent = xmlText(diDoc, 'Model')           || '—';
+    document.getElementById('di-fw').textContent    = xmlText(diDoc, 'FirmwareVersion') || '—';
+    document.getElementById('di-sn').textContent    = xmlText(diDoc, 'SerialNumber')    || '—';
+
+    // Step 4: GetProfiles
+    appendLog('log-connect', 'GetProfiles...', 'info');
+    const profSoap = buildSoap('<trt:GetProfiles/>');
+    const profXml  = await soapRequest(mediaSvcUrl, profSoap);
+    const profDoc  = parseXml(profXml);
+    const profileEl = [...profDoc.getElementsByTagNameNS('*', 'Profiles')][0]
+                   || [...profDoc.getElementsByTagNameNS('*', 'Profile')][0];
+    if (profileEl) {
+      const token = profileEl.getAttribute('token') || 'PTZProfile_1';
+      onvif.profileToken = token;
+      document.getElementById('di-token').textContent = token;
+    }
+
+    onvif.connected = true;
+    document.getElementById('di-status').textContent = '已连接';
+    document.getElementById('device-info').classList.add('visible');
+    appendLog('log-connect', '连接成功 ✓', 'ok');
+
+  } catch (e) {
+    appendLog('log-connect', `连接失败: ${e.message}`, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '⚡ 测试连接';
+  }
+}
+
+// ── ONVIF AbsoluteMove ─────────────────────────────────────────
+async function onvifAbsoluteMove() {
+  const pan  = parseFloat(document.getElementById('onvif-pan').value)  || 0;
+  const tilt = parseFloat(document.getElementById('onvif-tilt').value) || 0;
+  const zoom = parseFloat(document.getElementById('onvif-zoom').value) || 0;
+
+  const panC  = clamp(pan,  -1, 1);
+  const tiltC = clamp(tilt, -1, 1);
+  const zoomC = clamp(zoom,  0, 1);
+
+  const ptzSvc = (onvif.mode === 'ext'
+    ? document.getElementById('input-ptz-svc').value.trim()
+    : DEFAULT_PTZ_SVC) || DEFAULT_PTZ_SVC;
+
+  appendLog('log-ptz', `AbsoluteMove pan=${panC} tilt=${tiltC} zoom=${zoomC}`, 'info');
+
+  const soap = buildSoap(`
+    <tptz:AbsoluteMove>
+      <tptz:ProfileToken>${onvif.profileToken}</tptz:ProfileToken>
+      <tptz:Position>
+        <tt:PanTilt x="${panC}" y="${tiltC}" space="http://www.onvif.org/ver10/tptz/PanTiltSpaces/PositionGenericSpace"/>
+        <tt:Zoom x="${zoomC}" space="http://www.onvif.org/ver10/tptz/ZoomSpaces/PositionGenericSpace"/>
+      </tptz:Position>
+    </tptz:AbsoluteMove>`);
+
+  try {
+    await soapRequest(ptzSvc, soap);
+    appendLog('log-ptz', 'AbsoluteMove 成功 ✓', 'ok');
+    // 同步到摇杆：触发 pollStatus 拿后端已转换的角度值
+    setTimeout(pollStatus, 300);
+  } catch (e) {
+    appendLog('log-ptz', `失败: ${e.message}`, 'err');
+  }
+}
+
+// ── ONVIF GoToHomePosition ─────────────────────────────────────
+async function onvifGoHome() {
+  const ptzSvc = (onvif.mode === 'ext'
+    ? document.getElementById('input-ptz-svc').value.trim()
+    : DEFAULT_PTZ_SVC) || DEFAULT_PTZ_SVC;
+
+  appendLog('log-ptz', 'GoToHomePosition...', 'info');
+
+  const soap = buildSoap(`
+    <tptz:GotoHomePosition>
+      <tptz:ProfileToken>${onvif.profileToken}</tptz:ProfileToken>
+    </tptz:GotoHomePosition>`);
+
+  try {
+    await soapRequest(ptzSvc, soap);
+    appendLog('log-ptz', 'GoToHomePosition 成功 ✓', 'ok');
+    setTimeout(pollStatus, 300);
+  } catch (e) {
+    appendLog('log-ptz', `失败: ${e.message}`, 'err');
+  }
+}
+
+// ── ONVIF Snapshot ────────────────────────────────────────────
+async function onvifSnapshot() {
+  const btn = document.getElementById('btn-snap');
+  btn.disabled = true; btn.textContent = '抓图中...';
+
+  const mediaSvc = (onvif.mode === 'ext'
+    ? document.getElementById('input-media-svc').value.trim()
+    : DEFAULT_MEDIA_SVC) || DEFAULT_MEDIA_SVC;
+
+  document.getElementById('log-snap').innerHTML = '';
+  appendLog('log-snap', 'GetSnapshotUri...', 'info');
+
+  try {
+    // Step 1: GetSnapshotUri
+    const soap = buildSoap(`
+      <trt:GetSnapshotUri>
+        <trt:ProfileToken>${onvif.profileToken}</trt:ProfileToken>
+      </trt:GetSnapshotUri>`);
+
+    const respXml = await soapRequest(mediaSvc, soap);
+    const doc = parseXml(respXml);
+    const uriEl = [...doc.getElementsByTagNameNS('*', 'Uri')][0];
+    if (!uriEl) throw new Error('响应中未找到 Uri 字段');
+
+    const snapUrl = uriEl.textContent.trim();
+    if (!snapUrl) throw new Error('快照 URI 为空');
+
+    appendLog('log-snap', `URI: ${snapUrl}`, 'info');
+
+    // Step 2: 拉取图片
+    let imgBlob;
+    if (isSameOrigin(snapUrl)) {
+      const r = await fetch(snapUrl + '?_t=' + Date.now(), { signal: AbortSignal.timeout(8000) });
+      if (!r.ok) throw new Error(`图片 GET 失败: ${r.status}`);
+      imgBlob = await r.blob();
+    } else {
+      // 外部设备快照：通过代理
+      const r = await fetch(`${API}/onvif-proxy`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode:     'snapshot',
+          url:      snapUrl,
+          username: document.getElementById('input-user').value,
+          password: document.getElementById('input-pass').value,
+        }),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!r.ok) throw new Error(`代理抓图失败: ${r.status}`);
+      imgBlob = await r.blob();
+    }
+
+    const blobUrl = URL.createObjectURL(imgBlob);
+    const imgEl   = document.getElementById('snap-img');
+    // 释放旧的 blob URL
+    if (imgEl.src && imgEl.src.startsWith('blob:')) URL.revokeObjectURL(imgEl.src);
+    imgEl.src = blobUrl;
+
+    const dlEl = document.getElementById('snap-dl');
+    dlEl.href     = blobUrl;
+    dlEl.download = `snapshot_${Date.now()}.jpg`;
+
+    const timeStr = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    document.getElementById('snap-time').textContent = timeStr;
+    document.getElementById('snap-url-display').textContent = snapUrl;
+
+    document.getElementById('snap-preview').classList.add('visible');
+    appendLog('log-snap', `抓图成功 ✓ (${(imgBlob.size / 1024).toFixed(1)} KB)`, 'ok');
+
+  } catch (e) {
+    appendLog('log-snap', `抓图失败: ${e.message}`, 'err');
+  } finally {
+    btn.disabled = false; btn.textContent = '📷 抓图';
+  }
+}
+
+
+// ── Init ───────────────────────────────────────────────────────
 setWorkers(2);
 updateAll();
-startVideoStream();
+
 // 首次立即检测 Isaac 状态
 (async () => {
   try {
@@ -1510,6 +1809,8 @@ startVideoStream();
     }
   } catch { _applyIsaacState('stopped'); }
 })();
+
+loadPresets();
 setTimeout(pollStatus, 3000);
 </script>
 </body>

@@ -136,12 +136,54 @@ urllib.request.urlretrieve('http://localhost:8080/onvif-snap.jpg', 'snap.jpg')
 |------|------|
 | `http://localhost:8080/` | Web 控制面板 |
 
-Web UI 功能：
-- 启动 / 停止 Isaac Sim
-- 实时查看快照（每 500ms 自动刷新 `/onvif-snap.jpg`）
-- Pan / Tilt / Zoom 拖拽控制
-- 吊篮高度 + 工人数量控制
-- ONVIF 接入信息展示
+Web UI 三列布局：
+
+| 模块 | 功能 |
+|------|------|
+| **PTZ 控制** | 摇杆 / Zoom / 预置位 / 键盘快捷键 / RTSP 地址展示 |
+| **ONVIF 设置** | 连接测试 / 服务发现 / AbsoluteMove / GoToHomePosition / 快照抓图 |
+| **场景控制** | 吊篮高度 / 工人数量 |
+
+> **视频预览**：Web UI 不再内嵌任何视频流。视频预览请使用 VLC 等播放器拉取 RTSP 流：
+> `rtsp://<host>:8554/ptz_cam`
+
+ONVIF 设置模块支持两种模式：
+- **当前服务**：默认填充本机 ONVIF 端点，直连测试。
+- **外部设备**：手动填写目标设备地址，通过 `/onvif-proxy` 代理转发 SOAP/快照请求，解决 CORS 限制。
+
+---
+
+## 4.1 ONVIF 代理端点
+
+用于外部设备模式下，绕过浏览器 CORS 限制转发 SOAP / 快照请求。
+
+```
+POST /onvif-proxy
+Content-Type: application/json
+```
+
+请求体：
+
+```json
+{
+  "mode":     "soap",
+  "url":      "http://192.168.1.100/onvif/ptz_service",
+  "soap":     "<soap:Envelope>...</soap:Envelope>",
+  "action":   "",
+  "username": "admin",
+  "password": "pass"
+}
+```
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `mode` | 是 | `"soap"` 或 `"snapshot"` |
+| `url` | 是 | 目标 URL（仅 http/https；不允许 localhost/127.0.0.1） |
+| `soap` | mode=soap 时必填 | SOAP XML 请求体 |
+| `action` | 否 | SOAPAction 头 |
+| `username` / `password` | 否 | HTTP Basic 认证 |
+
+`mode="snapshot"` 时，代理执行 GET 并原样返回图片字节 + Content-Type。
 
 ---
 
@@ -203,9 +245,16 @@ Web UI 功能：
 
 ## 9. 变更说明
 
-**v4.0（当前版本）**：
+**v4.1（当前版本）**：
+- Web UI 重构为三列布局：PTZ 控制 / ONVIF 设置 / 场景控制。
+- **已彻底移除** WS-FLV、MJPEG、WebSocket 推流等网页预览链路。视频预览统一使用 VLC 拉取 `rtsp://<host>:8554/ptz_cam`。
+- 新增 `POST /onvif-proxy` 代理端点，支持外部 ONVIF 设备 SOAP/快照跨域访问。
+- ONVIF 设置模块支持标准连接测试（GetSystemDateAndTime → GetCapabilities → GetDeviceInformation → GetProfiles）、AbsoluteMove、GoToHomePosition、GetSnapshotUri 抓图。
+- `_snap_handle()` 去除 `_ws_cache` 依赖，改为实时拉取 + 离线占位图两级回退。
+
+**v4.0**：
 - 接入方式由 RTSP + MJPEG 改为标准 **ONVIF**（Profile S）
 - 新增内置 ONVIF SOAP 服务器（无需外部 onvif 库）
-- 已移除：RTSP 推流（ffmpeg + MediaMTX）、MJPEG 流、HLS
+- 已移除：HLS
 - 配置文件重命名：`ptz_rtsp_config.yaml` → `ptz_config.yaml`
 - 流脚本重命名：`ptz_rtsp_stream.py` → `ptz_stream.py`

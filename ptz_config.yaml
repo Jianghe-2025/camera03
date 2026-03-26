@@ -38,18 +38,14 @@ bitrate: "1M"
 # skip_frames = round(sim_hz / fps)，仿真比流帧率快时自动跳帧
 sim_hz: 60
 
-# RTSP 推流开关（true=同时输出 RTSP 供 VLC/NVR 使用；false=仅 MJPEG 浏览器预览）
-# 关闭后无需 ffmpeg 和 MediaMTX，启动更快，延迟更低
+# RTSP 推流开关（true=通过 ffmpeg+MediaMTX 输出 RTSP；false=不推流）
+# 视频预览统一使用 VLC 拉取 rtsp://<host>:8554/ptz_cam，Web UI 不再内嵌视频
+# 关闭后无需 ffmpeg 和 MediaMTX，启动更快
 rtsp_enabled: true
 
-# 预览链开关
-# false = 关闭 MJPEG 编码、ws-flv 广播、ws-fetcher 轮询，仅保留 RTSP + ONVIF/PTZ
-# true  = 同时开启网页预览（ws-flv / MJPEG）和 RTSP，资源占用更高
+# 已废弃（MJPEG/WS-FLV 推流链已移除，仅保留 RTSP + ONVIF/PTZ）
+# 保留此字段避免旧配置解析报错，值不再生效
 preview_enabled: false
-
-# MJPEG 画质（50~95，越高越清晰但带宽越大）
-# 本地网络建议 75~85；局域网可提高到 90
-mjpeg_quality: 80
 
 # 渲染器模式（仅 ptz_stream.py 使用）
 # RaytracedLighting：光线追踪，画质最好，GPU 压力最大
