@@ -13,7 +13,7 @@ python_sh: /home/uniubi/isaacsim/python.sh
 # 要加载的 USD 场景文件（相对路径或绝对路径）
 scene_path: /home/uniubi/Desktop/camera03-main/qiping_donghuo.usdz
 
-# qiping_donghuo.usdz 内为美术内置 Camera（非 CameraRig 三层）
+# 场景内为美术内置 Camera（非 CameraRig 三层）；camera_test.usd 与 qiping 包均为该路径
 camera_prim: /World/Camera_Lighttests
 
 # 除 camera_prim 外停用其它 Camera（推流与 PTZ 只认这一台）
