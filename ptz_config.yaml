@@ -11,7 +11,7 @@ ctrl_port: 8081
 python_sh: /home/uniubi/isaacsim/python.sh
 
 # 要加载的 USD 场景文件（相对路径或绝对路径）
-scene_path: /home/uniubi/Desktop/camera03-main/qiping_donghuo_light.usd
+scene_path: /home/uniubi/Desktop/camera03-main/qiping_light_camera_vector3.usd
 
 # 场景内为美术内置 Camera（非 CameraRig 三层）；camera_test.usd 与 qiping 包均为该路径
 camera_prim: /World/Camera_Lighttests
@@ -77,11 +77,24 @@ roam:
   #   y: [-2000, 2000]
   #   z: [-500, 500]
 
+# 气瓶场景（与 docs/气瓶动火报警判定流程.md 中「有气瓶 / 倾倒 / 防倾倒」演示一致）
+qiping_scene:
+  enabled: true
+  cylinders:
+    - prim: /World/QiPing/QiPing_CeShi/QiPing_CeShi/ZuHe4/group14/group16
+      fangqing_prim: /World/QiPing/FangQinDao02/FangQinDao02
+      upright_rotate: [0.0, 0.0, 0.0]
+      tilt_rotate: [36.743431091308594, 27.7154483795166, -73.21051025390625]
+    - prim: /World/QiPing/QiPing_CeShi/QiPing_CeShi/ZuHe4/group14/group15
+      fangqing_prim: /World/QiPing/FangQinDao01/FangQinDao01
+      upright_rotate: [0.0, 0.0, 0.0]
+      tilt_rotate: [36.743431091308594, 27.7154483795166, -73.21051025390625]
+
 # 成像：AE 开时推流只用 stream_rgb_gain；AE 关时推流再乘 (ISO/iso_stream_reference)。carb 项尽力写入，以推流增益为准。
 imaging:
   stream_rgb_gain: 1.0
   iso_stream_reference: 100.0
-  ae_enabled: false
+  ae_enabled: true
   iso: 100
   exposure_time: 0.05
 

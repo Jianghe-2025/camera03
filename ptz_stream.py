@@ -99,6 +99,10 @@ _img_cfg        = cfg.get("imaging") or {}
 STREAM_RGB_GAIN = float(_img_cfg.get("stream_rgb_gain", 1.0))
 ISO_STREAM_REF  = float(_img_cfg.get("iso_stream_reference", 100.0))
 
+_qiping_cfg = cfg.get("qiping_scene") or {}
+_QIPING_ENABLED = bool(_qiping_cfg.get("enabled", False))
+_QIPING_CYL = list(_qiping_cfg.get("cylinders") or [])
+
 W, H = resolution
 skip_frames = max(1, round(sim_hz / fps))
 
@@ -107,6 +111,8 @@ print(f"[PTZ-RTSP]       相机Prim={camera_prim}")
 print(f"[PTZ-RTSP]       RTSP URL={rtsp_url}  分辨率={W}x{H}  fps={fps}")
 print(f"[PTZ-RTSP]       renderer={renderer_mode}  preview_enabled={preview_enabled}")
 print(f"[PTZ-RTSP]       sim_hz={sim_hz}  skip_frames={skip_frames}")
+if _QIPING_ENABLED:
+    print(f"[PTZ-RTSP]       qiping_scene 已启用（{len(_QIPING_CYL)} 个气瓶）")
 
 # 启动 SimulationApp（headless 模式）
 from isaacsim import SimulationApp
@@ -163,6 +169,17 @@ _WORKER2_PRIM  = "/World/DiaoLan/Model/node______2"
 _scene_state = {
     "gondola_y": 0.0,    # 吊篮高度（0 ~ 3300，单位：cm 内部坐标）
     "workers":   2,      # 工人数量（0 / 1 / 2）
+    # 气瓶（Web 勾选=开启）：可见=show∧¬hide；防倾倒显示=fq_show∧¬fq_hide；有防倾倒时忽略 tilt
+    "c1_show": True,
+    "c1_hide": False,
+    "c1_fq_show": True,
+    "c1_fq_hide": False,
+    "c1_tilt": False,
+    "c2_show": True,
+    "c2_hide": False,
+    "c2_fq_show": True,
+    "c2_fq_hide": False,
+    "c2_tilt": False,
 }
 _scene_lock  = threading.Lock()
 _scene_dirty = threading.Event()
@@ -241,6 +258,21 @@ def _forward_to_pan_tilt_deg(fwd) -> tuple[float, float]:
     return pan, tilt
 
 
+def _rotation_to_quatd(rot):
+    """Gf.Rotation.GetQuaternion() 返回 Gf.Quaternion，不能直接 Gf.Quatd(gq)（Boost 无此重载）。"""
+    from pxr import Gf
+
+    gq = rot.GetQuaternion()
+    return Gf.Quatd(float(gq.GetReal()), Gf.Vec3d(gq.GetImaginary()))
+
+
+def _quat_any_to_quatd(q):
+    """Quatf / Quatd / 带 GetReal+GetImaginary 的类型 → Quatd，供四元数乘法用。"""
+    from pxr import Gf
+
+    return Gf.Quatd(float(q.GetReal()), Gf.Vec3d(q.GetImaginary()))
+
+
 def _sync_ptz_from_camera_prim(stage) -> None:
     """启动时从 camera_prim 读取朝向与焦距，写入 _ptz_state（供 /status 与页面同步）。"""
     global _flat_orient_baseline, _flat_ref_pan, _flat_ref_tilt
@@ -280,6 +312,99 @@ def _sync_ptz_from_camera_prim(stage) -> None:
     print(f"[PTZ-RTSP] 已从相机同步云台初值 pan={pan:.2f}° tilt={tilt:.2f}° zoom={zm:.2f}×")
 
 
+def _setup_direct_camera_orient(stage) -> None:
+    """扁平相机：若 xformOpOrder 里没有 orient，把现有 rotate* 换成 orient，否则 PTZ 写入无效。"""
+    global _flat_orient_baseline, _flat_ref_pan, _flat_ref_tilt
+    if not _camera_prim_is_direct_rig():
+        return
+    from pxr import Gf, UsdGeom, Usd, Sdf, Vt
+
+    cam_p = stage.GetPrimAtPath(camera_prim)
+    if not cam_p.IsValid():
+        return
+
+    xformable = UsdGeom.Xformable(cam_p)
+    ordered = xformable.GetOrderedXformOps()
+    ops_list = ordered[0] if isinstance(ordered, tuple) else ordered
+    op_names = [op.GetOpName() for op in ops_list]
+
+    if "xformOp:orient" in op_names:
+        oa = cam_p.GetAttribute("xformOp:orient")
+        if oa and oa.IsValid():
+            try:
+                _flat_orient_baseline = oa.Get()
+                with _ptz_lock:
+                    _flat_ref_pan = float(_ptz_state["pan"])
+                    _flat_ref_tilt = float(_ptz_state["tilt"])
+            except Exception:
+                pass
+        return
+
+    print(f"[PTZ-RTSP] 相机 {camera_prim} xformOpOrder={op_names}，无生效的 orient，正在转为 orient…")
+
+    rot_quat = Gf.Quatd(1, 0, 0, 0)
+    try:
+        cam_world = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        parent_p = cam_p.GetParent()
+        if parent_p and parent_p.IsValid():
+            try:
+                pw = UsdGeom.Xformable(parent_p).ComputeLocalToWorldTransform(
+                    Usd.TimeCode.Default())
+                local_m = pw.GetInverse() * cam_world
+            except Exception:
+                local_m = cam_world
+        else:
+            local_m = cam_world
+        rot_quat = _rotation_to_quatd(local_m.ExtractRotation())
+    except Exception as e:
+        print(f"[PTZ-RTSP]   旋转提取失败（使用单位四元数）: {e}")
+
+    new_order = []
+    orient_inserted = False
+    for name in op_names:
+        if any(k in name.lower() for k in ("rotate", "orient")):
+            if not orient_inserted:
+                new_order.append("xformOp:orient")
+                orient_inserted = True
+            continue
+        new_order.append(name)
+
+    if not orient_inserted:
+        idx = 0
+        for i, n in enumerate(new_order):
+            if n == "xformOp:translate":
+                idx = i + 1
+                break
+        new_order.insert(idx, "xformOp:orient")
+
+    orient_attr = cam_p.GetAttribute("xformOp:orient")
+    if not orient_attr or not orient_attr.IsValid():
+        orient_attr = cam_p.CreateAttribute(
+            "xformOp:orient", Sdf.ValueTypeNames.Quatf)
+    try:
+        orient_attr.Set(Gf.Quatf(rot_quat))
+    except Exception:
+        try:
+            orient_attr.Set(rot_quat)
+        except Exception:
+            orient_attr.Set(Gf.Quatf(1, 0, 0, 0))
+
+    order_attr = cam_p.GetAttribute("xformOpOrder")
+    if order_attr and order_attr.IsValid():
+        order_attr.Set(Vt.TokenArray(new_order))
+    else:
+        cam_p.CreateAttribute(
+            "xformOpOrder", Sdf.ValueTypeNames.TokenArray
+        ).Set(Vt.TokenArray(new_order))
+
+    _flat_orient_baseline = orient_attr.Get()
+    with _ptz_lock:
+        _flat_ref_pan = float(_ptz_state["pan"])
+        _flat_ref_tilt = float(_ptz_state["tilt"])
+
+    print(f"[PTZ-RTSP] xformOpOrder 已更新: {new_order}")
+
+
 def _apply_ptz_direct_camera(stage, pan_deg: float, tilt_deg: float, zoom: float) -> None:
     """无 Rig 时：在美术基准朝向上叠加 pan/tilt 增量，并写 focalLength。"""
     from pxr import Gf, UsdGeom
@@ -292,8 +417,14 @@ def _apply_ptz_direct_camera(stage, pan_deg: float, tilt_deg: float, zoom: float
     fl_attr = cam_p.GetAttribute("focalLength")
     if fl_attr and fl_attr.IsValid():
         fl_attr.Set(float(FOCAL_LENGTH_1X * zoom))
+
+    xformable = UsdGeom.Xformable(cam_p)
+    ordered = xformable.GetOrderedXformOps()
+    ops_list = ordered[0] if isinstance(ordered, tuple) else ordered
+    active_op_names = {op.GetOpName() for op in ops_list}
+
     orient_attr = cam_p.GetAttribute("xformOp:orient")
-    if orient_attr and orient_attr.IsValid():
+    if orient_attr and orient_attr.IsValid() and "xformOp:orient" in active_op_names:
         if _flat_orient_baseline is None:
             try:
                 _flat_orient_baseline = orient_attr.Get()
@@ -312,9 +443,9 @@ def _apply_ptz_direct_camera(stage, pan_deg: float, tilt_deg: float, zoom: float
             ry = Gf.Rotation(Gf.Vec3d(0.0, 1.0, 0.0), float(-dp))
             rz = Gf.Rotation(Gf.Vec3d(0.0, 0.0, 1.0), float(-dt))
             r_delta = ry * rz
-        qd = Gf.Quatd(r_delta.GetQuaternion())
+        qd = _rotation_to_quatd(r_delta)
         if _flat_orient_baseline is not None:
-            qb = Gf.Quatd(_flat_orient_baseline)
+            qb = _quat_any_to_quatd(_flat_orient_baseline)
             q_new = (qb * qd).GetNormalized()
         else:
             q_new = qd.GetNormalized()
@@ -323,16 +454,23 @@ def _apply_ptz_direct_camera(stage, pan_deg: float, tilt_deg: float, zoom: float
         except Exception:
             orient_attr.Set(q_new)
         return
-    # 无 orient 时尝试与 Rig 相同轴名的旋转（单 prim）
+
+    if orient_attr and orient_attr.IsValid() and "xformOp:orient" not in active_op_names:
+        print(
+            f"[PTZ-RTSP] ⚠ xformOp:orient 存在但未参与变换（不在 xformOpOrder 内），"
+            f"active={sorted(active_op_names)} — 请重启仿真以执行 _setup_direct_camera_orient"
+        )
+
+    # 无生效 orient 时尝试单轴 rotate（须也在 xformOpOrder 内）
     if _scene_up_axis == "Z":
         pan_attr_name, tilt_attr_name = "xformOp:rotateZ", "xformOp:rotateY"
     else:
         pan_attr_name, tilt_attr_name = "xformOp:rotateY", "xformOp:rotateZ"
     pa = cam_p.GetAttribute(pan_attr_name)
-    if pa and pa.IsValid():
+    if pa and pa.IsValid() and pan_attr_name in active_op_names:
         pa.Set(float(-pan_deg))
     ta = cam_p.GetAttribute(tilt_attr_name)
-    if ta and ta.IsValid():
+    if ta and ta.IsValid() and tilt_attr_name in active_op_names:
         ta.Set(float(-tilt_deg))
 
 
@@ -431,6 +569,72 @@ def _set_prim_visibility(stage, prim_path: str, visible: bool) -> None:
         attr.Set(_UG.Tokens.inherited if visible else _UG.Tokens.invisible)
 
 
+def _set_prim_rotate_xyz(stage, prim_path: str, rx: float, ry: float, rz: float) -> None:
+    """写入欧拉角（度），优先 xformOp:rotateXYZ。"""
+    from pxr import Gf
+
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim.IsValid():
+        return
+    v = Gf.Vec3d(float(rx), float(ry), float(rz))
+    for name in ("xformOp:rotateXYZ", "xformOp:rotateXyz", "xformOp:rotateZYX"):
+        attr = prim.GetAttribute(name)
+        if attr and attr.IsValid():
+            attr.Set(v)
+            return
+
+
+def _apply_qiping_cylinders(stage) -> None:
+    """气瓶可见性、防倾倒装置、倾倒 rotate（与 qiping_scene 配置一致）。"""
+    if not _QIPING_ENABLED or len(_QIPING_CYL) < 1:
+        return
+    with _scene_lock:
+        s = dict(_scene_state)
+    for idx, spec in enumerate(_QIPING_CYL[:2]):
+        if not isinstance(spec, dict):
+            continue
+        pfx = f"c{idx + 1}_"
+        cyl_path = str(spec.get("prim") or "").strip()
+        fq_path = str(spec.get("fangqing_prim") or "").strip()
+        up = spec.get("upright_rotate") or [0.0, 0.0, 0.0]
+        tilt_r = spec.get("tilt_rotate") or [0.0, 0.0, 0.0]
+        try:
+            ux, uy, uz = float(up[0]), float(up[1]), float(up[2])
+        except (TypeError, IndexError, ValueError):
+            ux = uy = uz = 0.0
+        try:
+            tx, ty, tz = float(tilt_r[0]), float(tilt_r[1]), float(tilt_r[2])
+        except (TypeError, IndexError, ValueError):
+            tx = ty = tz = 0.0
+
+        show = bool(s.get(f"{pfx}show", True))
+        hide = bool(s.get(f"{pfx}hide", False))
+        cyl_vis = show and not hide
+
+        fq_show = bool(s.get(f"{pfx}fq_show", False))
+        fq_hide = bool(s.get(f"{pfx}fq_hide", False))
+        fq_vis = fq_show and not fq_hide
+
+        tilt_on = bool(s.get(f"{pfx}tilt", False)) and not fq_vis
+
+        if not cyl_path:
+            continue
+        if not cyl_vis:
+            _set_prim_visibility(stage, cyl_path, False)
+            if fq_path:
+                _set_prim_visibility(stage, fq_path, False)
+            continue
+
+        _set_prim_visibility(stage, cyl_path, True)
+        if fq_path:
+            _set_prim_visibility(stage, fq_path, fq_vis)
+
+        if tilt_on:
+            _set_prim_rotate_xyz(stage, cyl_path, tx, ty, tz)
+        else:
+            _set_prim_rotate_xyz(stage, cyl_path, ux, uy, uz)
+
+
 def _apply_scene_state(stage) -> None:
     """将 _scene_state 写入 USD Stage：吊篮高度 + 工人显示。"""
     global _chosen_worker
@@ -461,6 +665,8 @@ def _apply_scene_state(stage) -> None:
         _set_prim_visibility(stage, _WORKER2_PRIM, True)
         _set_prim_y(stage, _WORKER1_PRIM, gondola_y)
         _set_prim_y(stage, _WORKER2_PRIM, gondola_y)
+
+    _apply_qiping_cylinders(stage)
 
 
 def _roam_translate_prim_path() -> str:
@@ -689,6 +895,31 @@ class _PTZHandler(BaseHTTPRequestHandler):
                 with _scene_lock:
                     if "count" in req:
                         _scene_state["workers"] = max(0, min(2, int(req["count"])))
+                _scene_dirty.set()
+                with _scene_lock:
+                    resp = json.dumps({"ok": True, "state": dict(_scene_state)})
+            except Exception as exc:
+                resp = json.dumps({"ok": False, "error": str(exc)})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self._cors()
+            self.end_headers()
+            self.wfile.write(resp.encode())
+            return
+
+        if self.path == "/scene/qiping":
+            length = int(self.headers.get("Content-Length", 0))
+            body   = self.rfile.read(length)
+            try:
+                req = json.loads(body)
+                _qk = frozenset({
+                    "c1_show", "c1_hide", "c1_fq_show", "c1_fq_hide", "c1_tilt",
+                    "c2_show", "c2_hide", "c2_fq_show", "c2_fq_hide", "c2_tilt",
+                })
+                with _scene_lock:
+                    for k, v in req.items():
+                        if k in _qk:
+                            _scene_state[k] = bool(v)
                 _scene_dirty.set()
                 with _scene_lock:
                     resp = json.dumps({"ok": True, "state": dict(_scene_state)})
@@ -1238,6 +1469,7 @@ def main():
     st = omni.usd.get_context().get_stage()
     _deactivate_other_cameras(st)
     _sync_ptz_from_camera_prim(st)
+    _setup_direct_camera_orient(st)
     _sync_roam_from_stage(st)
     _apply_imaging_carb()
 

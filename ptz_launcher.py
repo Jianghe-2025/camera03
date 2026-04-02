@@ -1513,7 +1513,14 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         # 透明代理 POST 到 Isaac Sim 的 /control、/scene/*、漫游与成像（Web UI 用）
-        if path in ("/control", "/scene/gondola", "/scene/workers", "/roam/position", "/imaging/settings"):
+        if path in (
+            "/control",
+            "/scene/gondola",
+            "/scene/workers",
+            "/scene/qiping",
+            "/roam/position",
+            "/imaging/settings",
+        ):
             length = int(self.headers.get("Content-Length", 0))
             body   = self.rfile.read(length)
             if _isaac_state != "running" and not _port_in_use(ISAAC_PORT):
