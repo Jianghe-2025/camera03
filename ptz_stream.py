@@ -91,6 +91,14 @@ renderer_mode   = cfg.get("renderer", "RaytracedLighting")  # 可切换为更轻
 _osd_cfg        = cfg.get("osd_time", {})
 osd_enabled     = _osd_cfg.get("enabled", False)
 
+_roam_cfg       = cfg.get("roam") or {}
+ROAM_STEP       = float(_roam_cfg.get("step", 0.5))
+_roam_bounds    = _roam_cfg.get("bounds")  # 可选 {"x":[lo,hi], ...}
+
+_img_cfg        = cfg.get("imaging") or {}
+STREAM_RGB_GAIN = float(_img_cfg.get("stream_rgb_gain", 1.0))
+ISO_STREAM_REF  = float(_img_cfg.get("iso_stream_reference", 100.0))
+
 W, H = resolution
 skip_frames = max(1, round(sim_hz / fps))
 
@@ -124,6 +132,7 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
+import math
 import numpy as np
 import omni.replicator.core as rep
 import omni.usd
@@ -163,6 +172,169 @@ _chosen_worker: int = 1   # 当 workers=1 时随机显示的工人编号（1 或
 _snapshot_jpeg: bytes | None = None
 _snapshot_lock = threading.Lock()
 
+# ── 机位漫游（世界平移，与聊天记录中 /roam/* 一致）────────────────
+_roam_state = {"x": 0.0, "y": 0.0, "z": 0.0}
+_roam_lock  = threading.Lock()
+_roam_dirty = threading.Event()
+
+# ── 成像（AE/ISO/曝光；推流侧 RGB 增益保证可见变化）────────────────
+_imaging_state = {
+    "ae": bool(_img_cfg.get("ae_enabled", _img_cfg.get("histogram_auto_exposure", False))),
+    "iso": float(_img_cfg.get("iso", 100.0)),
+    "exposure_time": float(_img_cfg.get("exposure_time", 0.05)),
+}
+_imaging_lock  = threading.Lock()
+_imaging_dirty = threading.Event()
+
+# 仅从仿真主循环读/写 Stage；HTTP 线程只设标志，避免 Omniverse 非线程安全导致崩溃
+_pending_scene_ptz_resync = threading.Event()
+
+# 扁平相机：美术原始 orient + 同步时的 pan/tilt 参考，云台增量用四元数复合
+_flat_orient_baseline = None  # Gf.Quatd | None
+_flat_ref_pan = 0.0
+_flat_ref_tilt = 0.0
+
+
+def _camera_prim_is_direct_rig() -> bool:
+    """路径深度 < 4（如 /World/Camera_Lighttests）视为单相机无 CameraRig/CamTilt 层级。"""
+    segs = [s for s in camera_prim.split("/") if s]
+    return len(segs) < 4
+
+
+def _deactivate_other_cameras(stage) -> None:
+    """除推流用的 camera_prim 外，将场景中其它 UsdGeom.Camera 设为不激活。"""
+    if not cfg.get("deactivate_other_cameras", True):
+        return
+    keep = camera_prim
+    n = 0
+    for prim in stage.Traverse():
+        if prim.GetTypeName() != "Camera":
+            continue
+        pth = str(prim.GetPath())
+        if pth == keep:
+            continue
+        try:
+            prim.SetActive(False)
+            n += 1
+        except Exception:
+            pass
+    if n:
+        print(f"[PTZ-RTSP] 已停用 {n} 个其它 Camera prim，保留推流相机 {keep}")
+
+
+def _forward_to_pan_tilt_deg(fwd) -> tuple[float, float]:
+    """将世界空间视线方向（USD 相机 -Z）映射为页面用 pan/tilt（度）。"""
+    from pxr import Gf
+
+    ln = fwd.GetLength()
+    if ln > 1e-12:
+        fwd = fwd / ln
+    fx, fy, fz = float(fwd[0]), float(fwd[1]), float(fwd[2])
+    if _scene_up_axis == "Z":
+        h = math.hypot(fx, fy)
+        pan = math.degrees(math.atan2(fx, fy)) if h > 1e-9 else 0.0
+        tilt = math.degrees(math.asin(max(-1.0, min(1.0, fz))))
+    else:
+        h = math.hypot(fx, fz)
+        pan = math.degrees(math.atan2(fx, fz)) if h > 1e-9 else 0.0
+        tilt = math.degrees(math.asin(max(-1.0, min(1.0, fy))))
+    return pan, tilt
+
+
+def _sync_ptz_from_camera_prim(stage) -> None:
+    """启动时从 camera_prim 读取朝向与焦距，写入 _ptz_state（供 /status 与页面同步）。"""
+    global _flat_orient_baseline, _flat_ref_pan, _flat_ref_tilt
+    if not _camera_prim_is_direct_rig():
+        return
+    from pxr import Gf, Usd, UsdGeom
+
+    cam_p = stage.GetPrimAtPath(camera_prim)
+    if not cam_p.IsValid():
+        return
+    xf = UsdGeom.Xformable(cam_p)
+    m = xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    fwd = m.TransformDir(Gf.Vec3d(0.0, 0.0, -1.0))
+    pan, tilt = _forward_to_pan_tilt_deg(fwd)
+    pan = max(-170.0, min(170.0, pan))
+    tilt = max(-90.0, min(30.0, tilt))
+    zm = 1.0
+    fl_attr = cam_p.GetAttribute("focalLength")
+    if fl_attr and fl_attr.IsValid():
+        try:
+            fl = float(fl_attr.Get())
+            zm = max(1.0, min(32.0, fl / FOCAL_LENGTH_1X))
+        except Exception:
+            pass
+    with _ptz_lock:
+        _ptz_state["pan"] = pan
+        _ptz_state["tilt"] = tilt
+        _ptz_state["zoom"] = zm
+    oa = cam_p.GetAttribute("xformOp:orient")
+    if oa and oa.IsValid():
+        try:
+            _flat_orient_baseline = oa.Get()
+            _flat_ref_pan = pan
+            _flat_ref_tilt = tilt
+        except Exception:
+            _flat_orient_baseline = None
+    print(f"[PTZ-RTSP] 已从相机同步云台初值 pan={pan:.2f}° tilt={tilt:.2f}° zoom={zm:.2f}×")
+
+
+def _apply_ptz_direct_camera(stage, pan_deg: float, tilt_deg: float, zoom: float) -> None:
+    """无 Rig 时：在美术基准朝向上叠加 pan/tilt 增量，并写 focalLength。"""
+    from pxr import Gf, UsdGeom
+
+    global _flat_orient_baseline, _flat_ref_pan, _flat_ref_tilt
+
+    cam_p = stage.GetPrimAtPath(camera_prim)
+    if not cam_p.IsValid():
+        return
+    fl_attr = cam_p.GetAttribute("focalLength")
+    if fl_attr and fl_attr.IsValid():
+        fl_attr.Set(float(FOCAL_LENGTH_1X * zoom))
+    orient_attr = cam_p.GetAttribute("xformOp:orient")
+    if orient_attr and orient_attr.IsValid():
+        if _flat_orient_baseline is None:
+            try:
+                _flat_orient_baseline = orient_attr.Get()
+                with _ptz_lock:
+                    _flat_ref_pan = float(_ptz_state["pan"])
+                    _flat_ref_tilt = float(_ptz_state["tilt"])
+            except Exception:
+                pass
+        dp = float(pan_deg) - float(_flat_ref_pan)
+        dt = float(tilt_deg) - float(_flat_ref_tilt)
+        if _scene_up_axis == "Z":
+            rz = Gf.Rotation(Gf.Vec3d(0.0, 0.0, 1.0), float(-dp))
+            ry = Gf.Rotation(Gf.Vec3d(0.0, 1.0, 0.0), float(-dt))
+            r_delta = rz * ry
+        else:
+            ry = Gf.Rotation(Gf.Vec3d(0.0, 1.0, 0.0), float(-dp))
+            rz = Gf.Rotation(Gf.Vec3d(0.0, 0.0, 1.0), float(-dt))
+            r_delta = ry * rz
+        qd = Gf.Quatd(r_delta.GetQuaternion())
+        if _flat_orient_baseline is not None:
+            qb = Gf.Quatd(_flat_orient_baseline)
+            q_new = (qb * qd).GetNormalized()
+        else:
+            q_new = qd.GetNormalized()
+        try:
+            orient_attr.Set(Gf.Quatf(q_new))
+        except Exception:
+            orient_attr.Set(q_new)
+        return
+    # 无 orient 时尝试与 Rig 相同轴名的旋转（单 prim）
+    if _scene_up_axis == "Z":
+        pan_attr_name, tilt_attr_name = "xformOp:rotateZ", "xformOp:rotateY"
+    else:
+        pan_attr_name, tilt_attr_name = "xformOp:rotateY", "xformOp:rotateZ"
+    pa = cam_p.GetAttribute(pan_attr_name)
+    if pa and pa.IsValid():
+        pa.Set(float(-pan_deg))
+    ta = cam_p.GetAttribute(tilt_attr_name)
+    if ta and ta.IsValid():
+        ta.Set(float(-tilt_deg))
+
 
 def _encode_jpeg(rgba) -> bytes | None:
     """将 RGBA numpy 数组编码为 JPEG bytes，优先 PIL，回退 OpenCV。"""
@@ -195,6 +367,10 @@ def _apply_ptz_state(stage) -> None:
         pan_deg  = _ptz_state["pan"]
         tilt_deg = _ptz_state["tilt"]
         zoom     = _ptz_state["zoom"]
+
+    if _camera_prim_is_direct_rig():
+        _apply_ptz_direct_camera(stage, pan_deg, tilt_deg, zoom)
+        return
 
     # 从 camera_prim 路径推断 pan/tilt prim 路径
     parts     = camera_prim.split("/")
@@ -287,6 +463,120 @@ def _apply_scene_state(stage) -> None:
         _set_prim_y(stage, _WORKER2_PRIM, gondola_y)
 
 
+def _roam_translate_prim_path() -> str:
+    """漫游写 translate 的目标：扁平相机写自身；三层 PTZ 写 CameraRig。"""
+    if _camera_prim_is_direct_rig():
+        return camera_prim
+    segs = [s for s in camera_prim.split("/") if s]
+    if len(segs) >= 4:
+        return "/" + "/".join(segs[:-2])
+    return camera_prim
+
+
+def _clamp_roam_axis(axis: str, v: float) -> float:
+    if not _roam_bounds or not isinstance(_roam_bounds, dict):
+        return v
+    b = _roam_bounds.get(axis)
+    if not b or len(b) != 2:
+        return v
+    return max(float(b[0]), min(float(b[1]), v))
+
+
+def _sync_roam_from_stage(stage) -> None:
+    path = _roam_translate_prim_path()
+    prim = stage.GetPrimAtPath(path)
+    if not prim.IsValid():
+        return
+    attr = prim.GetAttribute("xformOp:translate")
+    if not (attr and attr.IsValid()):
+        return
+    t = attr.Get()
+    if t is None:
+        return
+    with _roam_lock:
+        _roam_state["x"] = float(t[0])
+        _roam_state["y"] = float(t[1])
+        _roam_state["z"] = float(t[2])
+    print(
+        f"[PTZ-RTSP] 漫游初值（{path}）: "
+        f"({_roam_state['x']:.3f}, {_roam_state['y']:.3f}, {_roam_state['z']:.3f})"
+    )
+
+
+def _apply_roam_state(stage) -> None:
+    from pxr import Gf, UsdGeom
+
+    path = _roam_translate_prim_path()
+    prim = stage.GetPrimAtPath(path)
+    if not prim.IsValid():
+        return
+    with _roam_lock:
+        x = _clamp_roam_axis("x", _roam_state["x"])
+        y = _clamp_roam_axis("y", _roam_state["y"])
+        z = _clamp_roam_axis("z", _roam_state["z"])
+        _roam_state["x"], _roam_state["y"], _roam_state["z"] = x, y, z
+    attr = prim.GetAttribute("xformOp:translate")
+    if attr and attr.IsValid():
+        try:
+            attr.Set(Gf.Vec3d(x, y, z))
+        except Exception as e:
+            print(f"[PTZ-RTSP] 漫游 translate 写入失败: {e}")
+        return
+    try:
+        xf = UsdGeom.Xformable(prim)
+        xf.AddTranslateOp().Set(Gf.Vec3d(x, y, z))
+    except Exception as e:
+        print(f"[PTZ-RTSP] 漫游 AddTranslateOp 失败（prim 可能为只读引用）: {e}")
+
+
+def _apply_imaging_carb() -> None:
+    """尽力同步 RTX tonemap；Replicator 推流未必全吃 carb，推流亮度仍以 RGB 增益为准。"""
+    try:
+        import carb
+
+        s = carb.settings.get_settings()
+        with _imaging_lock:
+            ae = bool(_imaging_state["ae"])
+            iso = float(_imaging_state["iso"])
+            et = float(_imaging_state["exposure_time"])
+        s.set("/rtx/post/histogram/enabled", ae)
+        if not ae:
+            s.set("/rtx/post/tonemap/filmIso", max(1.0, min(12800.0, iso)))
+            s.set("/rtx/post/tonemap/exposureTime", max(1e-6, min(30.0, et)))
+        print(f"[PTZ-RTSP] imaging carb: ae={ae} iso={iso:.1f} exposure_time={et:.4f}s")
+    except Exception as e:
+        print(f"[PTZ-RTSP] imaging carb 跳过: {e}")
+
+
+def _compute_stream_rgb_gain() -> float:
+    with _imaging_lock:
+        ae = bool(_imaging_state["ae"])
+        iso = float(_imaging_state["iso"])
+    g = STREAM_RGB_GAIN
+    if not ae and ISO_STREAM_REF > 1e-9:
+        g *= max(0.02, min(64.0, iso / ISO_STREAM_REF))
+    return g
+
+
+def _status_payload() -> dict:
+    with _ptz_lock:
+        out = dict(_ptz_state)
+    with _roam_lock:
+        out["roam"] = {"x": _roam_state["x"], "y": _roam_state["y"], "z": _roam_state["z"]}
+    with _imaging_lock:
+        out["imaging"] = {
+            "ae": _imaging_state["ae"],
+            "iso": _imaging_state["iso"],
+            "exposure_time": _imaging_state["exposure_time"],
+        }
+    out["stream_rgb_gain"] = STREAM_RGB_GAIN
+    out["iso_stream_reference"] = ISO_STREAM_REF
+    out["scene_up_axis"] = _scene_up_axis
+    out["roam_step"] = ROAM_STEP
+    out["roam_target_prim"] = _roam_translate_prim_path()
+    return out
+
+
 class _PTZHandler(BaseHTTPRequestHandler):
     """轻量 HTTP handler：提供控制面板 HTML 和 REST 接口。"""
 
@@ -320,8 +610,17 @@ class _PTZHandler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/status":
-            with _ptz_lock:
-                body = json.dumps(_ptz_state).encode()
+            body = json.dumps(_status_payload()).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self._cors()
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if self.path == "/roam/state":
+            with _roam_lock:
+                body = json.dumps({"ok": True, "x": _roam_state["x"], "y": _roam_state["y"], "z": _roam_state["z"]}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self._cors()
@@ -402,21 +701,84 @@ class _PTZHandler(BaseHTTPRequestHandler):
             self.wfile.write(resp.encode())
             return
 
+        if self.path == "/roam/position":
+            length = int(self.headers.get("Content-Length", 0))
+            body   = self.rfile.read(length)
+            try:
+                req = json.loads(body)
+                with _roam_lock:
+                    if "x" in req and "y" in req and "z" in req:
+                        _roam_state["x"] = float(req["x"])
+                        _roam_state["y"] = float(req["y"])
+                        _roam_state["z"] = float(req["z"])
+                    else:
+                        _roam_state["x"] += float(req.get("dx", 0.0))
+                        _roam_state["y"] += float(req.get("dy", 0.0))
+                        _roam_state["z"] += float(req.get("dz", 0.0))
+                    snap = {"x": _roam_state["x"], "y": _roam_state["y"], "z": _roam_state["z"]}
+                _roam_dirty.set()
+                resp = json.dumps({"ok": True, "roam": snap})
+            except Exception as exc:
+                resp = json.dumps({"ok": False, "error": str(exc)})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self._cors()
+            self.end_headers()
+            self.wfile.write(resp.encode())
+            return
+
+        if self.path == "/imaging/settings":
+            length = int(self.headers.get("Content-Length", 0))
+            body   = self.rfile.read(length)
+            try:
+                req = json.loads(body)
+                with _imaging_lock:
+                    if "ae" in req:
+                        _imaging_state["ae"] = bool(req["ae"])
+                    if "iso" in req:
+                        _imaging_state["iso"] = max(50.0, min(12800.0, float(req["iso"])))
+                    if "exposure_time" in req:
+                        _imaging_state["exposure_time"] = max(1e-6, min(30.0, float(req["exposure_time"])))
+                _imaging_dirty.set()
+                with _imaging_lock:
+                    resp = json.dumps(
+                        {
+                            "ok": True,
+                            "imaging": {
+                                "ae": _imaging_state["ae"],
+                                "iso": _imaging_state["iso"],
+                                "exposure_time": _imaging_state["exposure_time"],
+                            },
+                        }
+                    )
+            except Exception as exc:
+                resp = json.dumps({"ok": False, "error": str(exc)})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self._cors()
+            self.end_headers()
+            self.wfile.write(resp.encode())
+            return
+
         if self.path == "/control":
             length = int(self.headers.get("Content-Length", 0))
             body   = self.rfile.read(length)
             try:
                 req = json.loads(body)
-                with _ptz_lock:
-                    if "pan"  in req:
-                        _ptz_state["pan"]  = max(-170.0, min(170.0, float(req["pan"])))
-                    if "tilt" in req:
-                        _ptz_state["tilt"] = max(-90.0,  min(30.0,  float(req["tilt"])))
-                    if "zoom" in req:
-                        _ptz_state["zoom"] = max(1.0,    min(32.0,  float(req["zoom"])))
-                _ptz_dirty.set()
-                with _ptz_lock:
-                    resp = json.dumps({"ok": True, "state": dict(_ptz_state)})
+                if req.get("reset_from_scene"):
+                    # 禁止在 HTTP 线程调 omni/USD，否则易崩溃；由主循环执行同步
+                    _pending_scene_ptz_resync.set()
+                    _ptz_dirty.set()
+                else:
+                    with _ptz_lock:
+                        if "pan"  in req:
+                            _ptz_state["pan"]  = max(-170.0, min(170.0, float(req["pan"])))
+                        if "tilt" in req:
+                            _ptz_state["tilt"] = max(-90.0,  min(30.0,  float(req["tilt"])))
+                        if "zoom" in req:
+                            _ptz_state["zoom"] = max(1.0,    min(32.0,  float(req["zoom"])))
+                    _ptz_dirty.set()
+                resp = json.dumps({"ok": True, "state": _status_payload()})
             except Exception as exc:
                 resp = json.dumps({"ok": False, "error": str(exc)})
             self.send_response(200)
@@ -873,6 +1235,12 @@ def main():
     for _ in range(10):
         world.step(render=True)
 
+    st = omni.usd.get_context().get_stage()
+    _deactivate_other_cameras(st)
+    _sync_ptz_from_camera_prim(st)
+    _sync_roam_from_stage(st)
+    _apply_imaging_carb()
+
     # --- 绑定相机 ---
     rp, annotator = _bind_camera(camera_prim, W, H)
 
@@ -907,15 +1275,43 @@ def main():
         if do_render:
             render_count += 1
 
+        # 从场景重读云台（仅主线程）
+        if _pending_scene_ptz_resync.is_set():
+            _pending_scene_ptz_resync.clear()
+            try:
+                _sync_ptz_from_camera_prim(omni.usd.get_context().get_stage())
+            except Exception as e:
+                print(f"[PTZ-RTSP] reset_from_scene / 相机同步失败: {e}")
+
         # 应用来自 Web UI 的 PTZ 指令（检测到脏标志时写入 USD Stage）
         if _ptz_dirty.is_set():
             _ptz_dirty.clear()
-            _apply_ptz_state(omni.usd.get_context().get_stage())
+            try:
+                _apply_ptz_state(omni.usd.get_context().get_stage())
+            except Exception as e:
+                print(f"[PTZ-RTSP] PTZ 写入 Stage 失败: {e}")
 
         # 应用场景控制指令（吊篮高度 + 工人数量）
         if _scene_dirty.is_set():
             _scene_dirty.clear()
-            _apply_scene_state(omni.usd.get_context().get_stage())
+            try:
+                _apply_scene_state(omni.usd.get_context().get_stage())
+            except Exception as e:
+                print(f"[PTZ-RTSP] 场景状态写入失败: {e}")
+
+        if _roam_dirty.is_set():
+            _roam_dirty.clear()
+            try:
+                _apply_roam_state(omni.usd.get_context().get_stage())
+            except Exception as e:
+                print(f"[PTZ-RTSP] 漫游写入失败: {e}")
+
+        if _imaging_dirty.is_set():
+            _imaging_dirty.clear()
+            try:
+                _apply_imaging_carb()
+            except Exception as e:
+                print(f"[PTZ-RTSP] imaging carb 失败: {e}")
 
         # 推流帧：采集并输出
         if do_render:
@@ -930,9 +1326,22 @@ def main():
             if rgba is not None and rgba.size > 0:
                 # 验证 shape 与配置分辨率一致，不一致时 resize 避免花屏
                 if rgba.shape[:2] != (H, W):
-                    rgba = np.ascontiguousarray(
-                        np.resize(rgba, (H, W, rgba.shape[2] if rgba.ndim == 3 else 4))
-                    )
+                    try:
+                        import cv2 as _cv2
+                        rgba = _cv2.resize(
+                            rgba, (W, H), interpolation=_cv2.INTER_AREA
+                        )
+                    except Exception:
+                        rgba = np.ascontiguousarray(
+                            np.resize(
+                                rgba,
+                                (H, W, rgba.shape[2] if rgba.ndim == 3 else 4),
+                            )
+                        )
+
+                gain = _compute_stream_rgb_gain()
+                if abs(gain - 1.0) > 1e-6 and rgba.dtype == np.uint8:
+                    rgba = np.clip(rgba.astype(np.float32) * gain, 0, 255).astype(np.uint8)
 
                 # ONVIF 快照帧缓存（独立于 preview_enabled，每帧更新）
                 jpg = _encode_jpeg(rgba)

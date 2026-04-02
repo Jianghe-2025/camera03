@@ -8,17 +8,16 @@ launcher_port: 8080
 # Isaac Sim 内部 HTTP 端口（由启动器按需拉起，不占 GPU 时不运行）
 ctrl_port: 8081
 # Isaac Sim (python.sh) 路径，供启动器调用
-python_sh: /home/uniubi/miniconda3/envs/env_isaaclab/bin/python3
-
+python_sh: /home/uniubi/isaacsim/python.sh
 
 # 要加载的 USD 场景文件（相对路径或绝对路径）
-scene_path: ./V4.0.usd
+scene_path: /home/uniubi/Desktop/camera03-main/qiping_donghuo.usdz
 
-# 场景中 PTZ 相机 Prim 的完整路径
-# V4.0.usd：裸 Camera + CameraRig 控制层级（Z-up，米）
-# V3.0.usd：camera_prim: /World/PTZ/Pan/Tilt/Camera
-# V2.0.usd：camera_prim: /World/Xform/Pan/Tilt/Camera
-camera_prim: /World/CameraRig/CamTilt/Camera
+# qiping_donghuo.usdz 内为美术内置 Camera（非 CameraRig 三层）
+camera_prim: /World/Camera_Lighttests
+
+# 除 camera_prim 外停用其它 Camera（推流与 PTZ 只认这一台）
+deactivate_other_cameras: true
 
 # 输出 RTSP 流地址
 rtsp_url: rtsp://localhost:8554/ptz_cam
@@ -69,6 +68,22 @@ osd_time:
 # 1× 广角基准焦距（mm），与场景中 Camera 的 focalLength 一致
 # 32× 变焦时焦距 = focal_length_1x * 32
 focal_length_1x: 18.14756
+
+# 相机漫游：平移 camera_prim（扁平相机）或 CameraRig（三层 PTZ）；仅改 USD，不停止推流
+roam:
+  step: 0.5
+  # bounds:   # 可选，按世界轴限制 [min, max]
+  #   x: [-2000, 2000]
+  #   y: [-2000, 2000]
+  #   z: [-500, 500]
+
+# 成像：AE 开时推流只用 stream_rgb_gain；AE 关时推流再乘 (ISO/iso_stream_reference)。carb 项尽力写入，以推流增益为准。
+imaging:
+  stream_rgb_gain: 1.0
+  iso_stream_reference: 100.0
+  ae_enabled: false
+  iso: 100
+  exposure_time: 0.05
 
 # MediaMTX RTSP 服务器配置
 mediamtx:

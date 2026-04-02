@@ -638,6 +638,63 @@
     padding: 2px 8px;
   }
   .snap-dl:hover { border-color: var(--accent); background: var(--glow); }
+  .snap-preview.visible .snap-img {
+    cursor: zoom-in;
+  }
+
+  /* 抓图全屏放大 */
+  .snap-lightbox {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 52px 20px 24px;
+    box-sizing: border-box;
+    background: rgba(0, 0, 0, 0.93);
+    cursor: zoom-out;
+  }
+  .snap-lightbox.visible { display: flex; }
+  .snap-lightbox-hint {
+    position: absolute;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 0.72rem;
+    color: var(--text2);
+    pointer-events: none;
+    user-select: none;
+  }
+  .snap-lightbox-close {
+    position: absolute;
+    top: 8px;
+    right: 12px;
+    width: 36px;
+    height: 36px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg2);
+    color: var(--text);
+    font-size: 1.4rem;
+    line-height: 1;
+    cursor: pointer;
+    z-index: 1;
+  }
+  .snap-lightbox-close:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .snap-lightbox img {
+    max-width: 100%;
+    max-height: calc(100vh - 100px);
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    cursor: default;
+    pointer-events: auto;
+  }
 
   /* ─── Scene Control ─────────────────────────────────────── */
   .scene-card { border-color: rgba(255,170,0,.2); }
@@ -753,6 +810,12 @@
   <div class="ovl-log" id="ovl-log"></div>
 </div>
 
+<div id="snap-lightbox" class="snap-lightbox" aria-hidden="true" role="dialog" aria-label="快照放大预览">
+  <button type="button" class="snap-lightbox-close" id="snap-lightbox-close" aria-label="关闭">×</button>
+  <p class="snap-lightbox-hint">按 Esc 关闭 · 点击空白处关闭</p>
+  <img id="snap-lightbox-img" src="" alt="快照放大">
+</div>
+
 <main>
 
   <!-- ══════════════════ 模块1: PTZ 控制 ══════════════════ -->
@@ -785,7 +848,7 @@
             <button class="nbtn" onclick="nudge('pan', 10)">Pan+10° ▶</button>
             <button class="nbtn" onclick="nudge('tilt',-10)">▲ Tilt-10°</button>
             <button class="nbtn" onclick="nudge('tilt', 10)">▼ Tilt+10°</button>
-            <button class="reset-btn" onclick="resetPT()">↺ 默认位 (Pan=-56°, Tilt=9°)</button>
+            <button class="reset-btn" onclick="resetPT()">↺ 从场景相机同步</button>
           </div>
         </div>
       </div>
@@ -806,6 +869,54 @@
         <button class="zbtn" onclick="setZoom(8)">8×</button>
         <button class="zbtn" onclick="setZoom(16)">16×</button>
         <button class="zbtn" onclick="setZoom(32)">32×</button>
+      </div>
+    </div>
+
+    <!-- 成像 AE / ISO / 曝光（推流不中断，仅改渲染与 RGB 增益） -->
+    <div class="card" id="card-imaging">
+      <div class="card-title">成像（AE / ISO / 曝光）</div>
+      <p class="scene-hint" style="margin:0 0 8px;font-size:12px;color:var(--muted);">
+        AE 开启：直方图自动曝光，推流仅乘「基础增益」；AE 关闭：推流再按 ISO/参考值缩放，并尽力写入仿真 tonemap。
+      </p>
+      <label class="form-row" style="display:flex;align-items:center;gap:8px;">
+        <input type="checkbox" id="imaging-ae"> 自动曝光 (AE)
+      </label>
+      <div class="zoom-row" style="margin-top:8px;">
+        <span class="zoom-label">ISO</span>
+        <input type="range" id="imaging-iso" min="50" max="12800" step="10" value="100">
+        <span class="zoom-val" id="imaging-iso-val">100</span>
+      </div>
+      <div class="zoom-row" style="margin-top:8px;">
+        <span class="zoom-label">曝光(s)</span>
+        <input type="range" id="imaging-exp" min="0" max="1000" step="1" value="300">
+        <span class="zoom-val" id="imaging-exp-val">0.0500</span>
+      </div>
+      <button class="reset-btn" type="button" id="btn-imaging-apply" style="margin-top:8px;">应用到仿真</button>
+    </div>
+
+    <!-- 相机漫游 -->
+    <div class="card" id="card-roam">
+      <div class="card-title">相机漫游（机位平移）</div>
+      <p class="scene-hint" id="roam-axis-hint" style="margin:0 0 8px;font-size:12px;color:var(--muted);">
+        加载状态后显示轴向说明；仅改 USD 平移，RTSP 不停止。
+      </p>
+      <div class="form-row-2">
+        <div class="form-row" style="margin-bottom:4px;">
+          <label class="form-label">X</label>
+          <input class="form-input" id="roam-x" type="number" step="0.01" value="0">
+        </div>
+        <div class="form-row" style="margin-bottom:4px;">
+          <label class="form-label">Y</label>
+          <input class="form-input" id="roam-y" type="number" step="0.01" value="0">
+        </div>
+        <div class="form-row" style="margin-bottom:4px;">
+          <label class="form-label">Z</label>
+          <input class="form-input" id="roam-z" type="number" step="0.01" value="0">
+        </div>
+      </div>
+      <div class="nudge-grid" style="margin-top:8px;">
+        <button class="nbtn" type="button" id="btn-roam-apply">应用坐标</button>
+        <button class="nbtn" type="button" id="btn-roam-sync">从仿真同步</button>
       </div>
     </div>
 
@@ -853,7 +964,8 @@
         <div><kbd>←</kbd><kbd>→</kbd> Pan ±5°</div>
         <div><kbd>↑</kbd><kbd>↓</kbd> Tilt ±5°</div>
         <div><kbd>+</kbd><kbd>-</kbd> Zoom ±1×</div>
-        <div><kbd>Home</kbd> 归中默认</div>
+        <div><kbd>Home</kbd> 从场景同步 PTZ</div>
+        <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><kbd>Q</kbd><kbd>E</kbd> 漫游平移（步长见状态栏）</div>
       </div>
     </div>
 
@@ -972,7 +1084,7 @@
     <div class="card onvif-card">
       <div class="card-title onvif-accent">ONVIF 快照抓图</div>
       <p style="font-size:.62rem;color:var(--text3);margin-bottom:10px;">
-        通过 GetSnapshotUri 获取 ONVIF 标准快照地址，再拉取图片展示。
+        通过 GetSnapshotUri 获取 ONVIF 标准快照地址，再拉取图片展示。抓图后<strong>点击缩略图</strong>可全屏放大，<strong>Esc</strong> 或点空白处关闭。
       </p>
 
       <button class="btn-primary accent2" id="btn-snap" onclick="onvifSnapshot()">📷 抓图</button>
@@ -1061,9 +1173,23 @@ const RTSP_URL           = `rtsp://${HOST}:8554/ptz_cam`;
 let isaacState = 'stopped';
 
 // ── PTZ State ─────────────────────────────────────────────────
-const state = { pan: -56, tilt: 9, zoom: 1 };
+const state = { pan: 0, tilt: 0, zoom: 1 };
 const LIMITS = { pan: [-170, 170], tilt: [-90, 30], zoom: [1, 32] };
 const presetStore = new Map();
+
+let sceneUp = 'Z';
+let roamStep = 0.5;
+const _EXP_MIN = 1e-4;
+const _EXP_MAX = 30;
+function expSliderToSeconds(sl) {
+  const t = sl / 1000;
+  return Math.exp(Math.log(_EXP_MIN) + t * (Math.log(_EXP_MAX) - Math.log(_EXP_MIN)));
+}
+function secondsToExpSlider(sec) {
+  const s = Math.max(_EXP_MIN, Math.min(_EXP_MAX, sec));
+  const t = (Math.log(s) - Math.log(_EXP_MIN)) / (Math.log(_EXP_MAX) - Math.log(_EXP_MIN));
+  return Math.round(t * 1000);
+}
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
@@ -1339,6 +1465,25 @@ async function _pollLog() {
 }
 
 // ── 状态轮询 ───────────────────────────────────────────────────
+function roamInputsFocused() {
+  const a = document.activeElement;
+  return a && a.id && String(a.id).startsWith('roam-');
+}
+function imagingInputsFocused() {
+  const a = document.activeElement;
+  return a && a.id && String(a.id).startsWith('imaging-');
+}
+
+function updateRoamAxisHint() {
+  const el = document.getElementById('roam-axis-hint');
+  if (!el) return;
+  if (sceneUp === 'Z') {
+    el.textContent = '场景 up=Z：WASD 水平（W/S→±Y，A/D→±X），Q/E→±Z · 步长 ' + roamStep;
+  } else {
+    el.textContent = '场景 up=Y：WASD 水平（W/S→±Z，A/D→±X），Q/E→±Y · 步长 ' + roamStep;
+  }
+}
+
 async function pollStatus() {
   try {
     const r = await fetch(`${API}/status`, { signal: AbortSignal.timeout(2000) });
@@ -1348,6 +1493,20 @@ async function pollStatus() {
     if (s.isaac_state === 'running' && s.ptz && !dragging) {
       state.pan = s.ptz.pan; state.tilt = s.ptz.tilt; state.zoom = s.ptz.zoom;
       updateAll();
+    }
+    if (s.isaac_state === 'running' && s.ptz) {
+      if (s.ptz.scene_up_axis) sceneUp = s.ptz.scene_up_axis;
+      if (typeof s.ptz.roam_step === 'number') roamStep = s.ptz.roam_step;
+      updateRoamAxisHint();
+      if (s.ptz.roam && !roamInputsFocused()) setRoamInputsFromRoam(s.ptz.roam);
+      if (s.ptz.imaging && !imagingInputsFocused()) {
+        document.getElementById('imaging-ae').checked = !!s.ptz.imaging.ae;
+        document.getElementById('imaging-iso').value = String(Math.round(s.ptz.imaging.iso));
+        document.getElementById('imaging-iso-val').textContent = String(Math.round(s.ptz.imaging.iso));
+        const esl = secondsToExpSlider(s.ptz.imaging.exposure_time);
+        document.getElementById('imaging-exp').value = String(esl);
+        document.getElementById('imaging-exp-val').textContent = Number(s.ptz.imaging.exposure_time).toFixed(4);
+      }
     }
     if (s.isaac_state === 'running') setApiStatus(true);
   } catch { /* ignore */ }
@@ -1364,18 +1523,107 @@ function setZoom(z) {
   state.zoom = clamp(z, 1, 32);
   updateAll(); scheduleApply();
 }
-function resetPT() {
-  state.pan = -56; state.tilt = 9;
-  updateAll(); sendControl();
+async function resetPT() {
+  try {
+    const r = await fetch(`${API}/control`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reset_from_scene: true }),
+    });
+    const d = await r.json();
+    if (d.state) {
+      state.pan = d.state.pan; state.tilt = d.state.tilt; state.zoom = d.state.zoom;
+    }
+    // 同步在 Isaac 主线程下一帧才完成，稍后拉 /status 对齐 UI
+    setTimeout(() => pollStatus(), 200);
+  } catch { /* ignore */ }
+  updateAll();
 }
 function go(pan, tilt, zoom) {
   state.pan = pan; state.tilt = tilt; state.zoom = zoom;
   updateAll(); sendControl();
 }
 
+function setRoamInputsFromRoam(roam) {
+  if (!roam) return;
+  const x = Number(roam.x), y = Number(roam.y), z = Number(roam.z);
+  if (![x, y, z].every(Number.isFinite)) return;
+  document.getElementById('roam-x').value = x.toFixed(4);
+  document.getElementById('roam-y').value = y.toFixed(4);
+  document.getElementById('roam-z').value = z.toFixed(4);
+}
+
+async function postRoamDelta(dx, dy, dz) {
+  if (isaacState !== 'running') return;
+  try {
+    const r = await fetch(`${API}/roam/position`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dx, dy, dz }),
+    });
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.ok && d.roam) setRoamInputsFromRoam(d.roam);
+  } catch { /* ignore */ }
+}
+
+function snapLightboxIsOpen() {
+  const lb = document.getElementById('snap-lightbox');
+  return lb && lb.classList.contains('visible');
+}
+
+function openSnapLightbox() {
+  const srcEl = document.getElementById('snap-img');
+  const src = srcEl && srcEl.getAttribute('src');
+  if (!src) return;
+  const lb = document.getElementById('snap-lightbox');
+  const lbImg = document.getElementById('snap-lightbox-img');
+  lbImg.src = src;
+  lb.classList.add('visible');
+  lb.setAttribute('aria-hidden', 'false');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeSnapLightbox() {
+  const lb = document.getElementById('snap-lightbox');
+  if (!lb) return;
+  lb.classList.remove('visible');
+  lb.setAttribute('aria-hidden', 'true');
+  document.body.style.overflow = '';
+}
+
 // ── Keyboard shortcuts ────────────────────────────────────────
 document.addEventListener('keydown', e => {
-  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'Escape' && snapLightboxIsOpen()) {
+    e.preventDefault();
+    closeSnapLightbox();
+    return;
+  }
+  const tag = e.target.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if (isaacState === 'running' && !snapLightboxIsOpen() && 'wasdqe'.includes(k)) {
+    const step = roamStep;
+    let dx = 0, dy = 0, dz = 0;
+    if (sceneUp === 'Z') {
+      if (k === 'w') dy = step;
+      if (k === 's') dy = -step;
+      if (k === 'a') dx = -step;
+      if (k === 'd') dx = step;
+      if (k === 'q') dz = -step;
+      if (k === 'e') dz = step;
+    } else {
+      if (k === 'w') dz = step;
+      if (k === 's') dz = -step;
+      if (k === 'a') dx = -step;
+      if (k === 'd') dx = step;
+      if (k === 'q') dy = -step;
+      if (k === 'e') dy = step;
+    }
+    e.preventDefault();
+    postRoamDelta(dx, dy, dz);
+    return;
+  }
   const map = {
     'ArrowLeft':  () => nudge('pan',  -5),
     'ArrowRight': () => nudge('pan',   5),
@@ -1384,9 +1632,68 @@ document.addEventListener('keydown', e => {
     '+':          () => nudge('zoom',  1),
     '=':          () => nudge('zoom',  1),
     '-':          () => nudge('zoom', -1),
-    'Home':       () => go(-56, 9, 1),
+    'Home':       () => { resetPT(); },
   };
   if (map[e.key]) { e.preventDefault(); map[e.key](); }
+});
+
+async function applyRoamXYZ() {
+  if (isaacState !== 'running') return;
+  const x = parseFloat(document.getElementById('roam-x').value);
+  const y = parseFloat(document.getElementById('roam-y').value);
+  const z = parseFloat(document.getElementById('roam-z').value);
+  try {
+    const r = await fetch(`${API}/roam/position`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ x, y, z }),
+    });
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.ok && d.roam) setRoamInputsFromRoam(d.roam);
+  } catch { /* ignore */ }
+}
+
+async function syncRoamFromServer() {
+  try {
+    const r = await fetch(`${API}/roam/state`, { signal: AbortSignal.timeout(3000) });
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.ok) setRoamInputsFromRoam({ x: d.x, y: d.y, z: d.z });
+  } catch { /* ignore */ }
+}
+
+let _imagingTimer = null;
+async function sendImagingNow() {
+  if (isaacState !== 'running') return;
+  const ae = document.getElementById('imaging-ae').checked;
+  const iso = parseFloat(document.getElementById('imaging-iso').value);
+  const esl = parseInt(document.getElementById('imaging-exp').value, 10);
+  const exposure_time = expSliderToSeconds(esl);
+  try {
+    await fetch(`${API}/imaging/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ae, iso, exposure_time }),
+    });
+  } catch { /* ignore */ }
+}
+function scheduleImaging() {
+  clearTimeout(_imagingTimer);
+  _imagingTimer = setTimeout(sendImagingNow, 180);
+}
+
+document.getElementById('btn-roam-apply').addEventListener('click', () => applyRoamXYZ());
+document.getElementById('btn-roam-sync').addEventListener('click', () => syncRoamFromServer());
+document.getElementById('btn-imaging-apply').addEventListener('click', () => sendImagingNow());
+document.getElementById('imaging-ae').addEventListener('change', () => sendImagingNow());
+document.getElementById('imaging-iso').addEventListener('input', (e) => {
+  document.getElementById('imaging-iso-val').textContent = e.target.value;
+  scheduleImaging();
+});
+document.getElementById('imaging-exp').addEventListener('input', (e) => {
+  document.getElementById('imaging-exp-val').textContent = expSliderToSeconds(parseInt(e.target.value, 10)).toFixed(4);
+  scheduleImaging();
 });
 
 // ── 场景控制 ───────────────────────────────────────────────────
@@ -1797,6 +2104,7 @@ async function onvifSnapshot() {
 // ── Init ───────────────────────────────────────────────────────
 setWorkers(2);
 updateAll();
+updateRoamAxisHint();
 
 // 首次立即检测 Isaac 状态
 (async () => {
@@ -1805,13 +2113,34 @@ updateAll();
     if (r.ok) {
       const s = await r.json();
       _applyIsaacState(s.isaac_state || 'stopped');
-      if (s.ptz) { Object.assign(state, s.ptz); updateAll(); }
+      if (s.ptz) {
+        if (typeof s.ptz.pan === 'number') state.pan = s.ptz.pan;
+        if (typeof s.ptz.tilt === 'number') state.tilt = s.ptz.tilt;
+        if (typeof s.ptz.zoom === 'number') state.zoom = s.ptz.zoom;
+        if (s.ptz.scene_up_axis) sceneUp = s.ptz.scene_up_axis;
+        if (typeof s.ptz.roam_step === 'number') roamStep = s.ptz.roam_step;
+        updateRoamAxisHint();
+        if (s.ptz.roam) setRoamInputsFromRoam(s.ptz.roam);
+        if (s.ptz.imaging) {
+          document.getElementById('imaging-ae').checked = !!s.ptz.imaging.ae;
+          document.getElementById('imaging-iso').value = String(Math.round(s.ptz.imaging.iso));
+          document.getElementById('imaging-iso-val').textContent = String(Math.round(s.ptz.imaging.iso));
+          document.getElementById('imaging-exp').value = String(secondsToExpSlider(s.ptz.imaging.exposure_time));
+          document.getElementById('imaging-exp-val').textContent = Number(s.ptz.imaging.exposure_time).toFixed(4);
+        }
+        updateAll();
+      }
     }
   } catch { _applyIsaacState('stopped'); }
 })();
 
 loadPresets();
 setTimeout(pollStatus, 3000);
+
+document.getElementById('snap-img').addEventListener('click', () => openSnapLightbox());
+document.getElementById('snap-lightbox').addEventListener('click', (e) => {
+  if (e.target.id !== 'snap-lightbox-img') closeSnapLightbox();
+});
 </script>
 </body>
 </html>

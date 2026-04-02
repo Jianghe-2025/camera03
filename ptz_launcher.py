@@ -351,12 +351,14 @@ def get_status() -> dict:
     }
     if state == "running":
         try:
+            # 抓图/重负载时 Isaac 内 HTTP 可能 >1s 才响应；超时勿把对外状态改成 starting，
+            # 否则 Web 会误以为仿真在重启（实际进程未停）。
             with urllib.request.urlopen(
-                f"http://localhost:{ISAAC_PORT}/status", timeout=1
+                f"http://localhost:{ISAAC_PORT}/status", timeout=3
             ) as r:
                 result["ptz"] = json.loads(r.read())
         except Exception:
-            result["isaac_state"] = "starting"
+            result["ptz"] = None
     return result
 
 
@@ -1488,6 +1490,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._proxy_once(f"http://localhost:{ISAAC_PORT}/scene/state")
             return
 
+        if path == "/roam/state":
+            self._proxy_once(f"http://localhost:{ISAAC_PORT}/roam/state")
+            return
+
         self.send_response(404); self.end_headers()
 
     # ── POST ─────────────────────────────────────────────────────────
@@ -1506,8 +1512,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._preset_post(path)
             return
 
-        # 透明代理 POST 到 Isaac Sim 的 /control 和 /scene/* 端点（Web UI 用）
-        if path in ("/control", "/scene/gondola", "/scene/workers"):
+        # 透明代理 POST 到 Isaac Sim 的 /control、/scene/*、漫游与成像（Web UI 用）
+        if path in ("/control", "/scene/gondola", "/scene/workers", "/roam/position", "/imaging/settings"):
             length = int(self.headers.get("Content-Length", 0))
             body   = self.rfile.read(length)
             if _isaac_state != "running" and not _port_in_use(ISAAC_PORT):
@@ -1757,7 +1763,7 @@ class _Handler(BaseHTTPRequestHandler):
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=2) as r:
+            with urllib.request.urlopen(req, timeout=30) as r:
                 resp = r.read()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
