@@ -11,7 +11,7 @@ ctrl_port: 8081
 python_sh: /home/uniubi/isaacsim/python.sh
 
 # 要加载的 USD 场景文件（相对路径或绝对路径）
-scene_path: /home/uniubi/Desktop/camera03-main/qiping_donghuo.usdz
+scene_path: /home/uniubi/Desktop/camera03-main/qiping_donghuo_light.usd
 
 # 场景内为美术内置 Camera（非 CameraRig 三层）；camera_test.usd 与 qiping 包均为该路径
 camera_prim: /World/Camera_Lighttests
